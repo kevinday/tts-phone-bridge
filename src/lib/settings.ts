@@ -13,6 +13,8 @@ const KEY_VOICE_NAME = "ttsb.voiceName";
 const KEY_OUTPUT_DEVICE_ID = "ttsb.outputDeviceId";
 const KEY_OUTPUT_DEVICE_LABEL = "ttsb.outputDeviceLabel";
 const KEY_SETUP_COMPLETED = "ttsb.setupCompleted";
+const KEY_QUICK_PHRASES = "ttsb.quickPhrases";
+const KEY_AUTO_SEND_PUNCTUATION = "ttsb.autoSendPunctuation";
 
 export interface Settings {
   apiKey: string;
@@ -21,7 +23,19 @@ export interface Settings {
   outputDeviceId: string;
   outputDeviceLabel: string;
   setupCompleted: boolean;
+  quickPhrases: string[];
+  autoSendPunctuation: boolean;
 }
+
+export const DEFAULT_QUICK_PHRASES = [
+  "Yes",
+  "No",
+  "Thank you",
+  "One moment please",
+  "Could you repeat that?",
+  "I'm sorry",
+  "Goodbye",
+];
 
 export function loadSettings(): Settings {
   return {
@@ -31,7 +45,26 @@ export function loadSettings(): Settings {
     outputDeviceId: localStorage.getItem(KEY_OUTPUT_DEVICE_ID) ?? "",
     outputDeviceLabel: localStorage.getItem(KEY_OUTPUT_DEVICE_LABEL) ?? "",
     setupCompleted: localStorage.getItem(KEY_SETUP_COMPLETED) === "true",
+    quickPhrases: loadQuickPhrases(),
+    // Default ON — matches the auto-send-on-punctuation recommendation for
+    // fluent typists. Users can disable via the status-bar toggle.
+    autoSendPunctuation:
+      (localStorage.getItem(KEY_AUTO_SEND_PUNCTUATION) ?? "true") === "true",
   };
+}
+
+function loadQuickPhrases(): string[] {
+  const raw = localStorage.getItem(KEY_QUICK_PHRASES);
+  if (!raw) return DEFAULT_QUICK_PHRASES;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
+      return parsed;
+    }
+  } catch {
+    /* fall through */
+  }
+  return DEFAULT_QUICK_PHRASES;
 }
 
 export function saveApiKey(apiKey: string): void {
@@ -54,4 +87,12 @@ export function markSetupCompleted(): void {
 
 export function clearSetupCompleted(): void {
   localStorage.removeItem(KEY_SETUP_COMPLETED);
+}
+
+export function saveQuickPhrases(phrases: string[]): void {
+  localStorage.setItem(KEY_QUICK_PHRASES, JSON.stringify(phrases));
+}
+
+export function saveAutoSendPunctuation(enabled: boolean): void {
+  localStorage.setItem(KEY_AUTO_SEND_PUNCTUATION, enabled ? "true" : "false");
 }
