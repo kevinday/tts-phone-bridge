@@ -76,8 +76,9 @@ export function openSpeakStream(opts: StreamSpeakOptions): StreamHandle {
   let aborted = false;
   let initSent = false;
 
-  // Buffer any text that .send() received before the socket opened.
+  // Buffer any text / flush that arrived before the socket opened.
   const pendingText: string[] = [];
+  let pendingFlush = false;
 
   ws.addEventListener("open", () => {
     // Per ElevenLabs protocol the first frame sets voice / generation config.
@@ -105,6 +106,12 @@ export function openSpeakStream(opts: StreamSpeakOptions): StreamHandle {
     // Drain anything queued before open.
     for (const t of pendingText) ws.send(JSON.stringify({ text: t }));
     pendingText.length = 0;
+    // If the caller already asked to flush, send the terminator now so the
+    // server doesn't sit waiting for more input and trigger its 20s timeout.
+    if (pendingFlush) {
+      ws.send(JSON.stringify({ text: "" }));
+      pendingFlush = false;
+    }
   });
 
   ws.addEventListener("message", (ev) => {
@@ -162,8 +169,13 @@ export function openSpeakStream(opts: StreamSpeakOptions): StreamHandle {
     },
     flushAndClose() {
       // Empty-string text tells the server "I'm done, flush and finalize."
+      // If the socket is still CONNECTING (common — callers typically send
+      // text then flush synchronously after openSpeakStream), queue the flush
+      // and let the open handler fire it after draining pending text.
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ text: "" }));
+      } else if (ws.readyState === WebSocket.CONNECTING) {
+        pendingFlush = true;
       }
       // The server will emit isFinal then close. We don't close() here.
     },
