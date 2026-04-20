@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0f172a"/>
+  <!-- phone handset -->
+  <path d="M132 150 Q132 122 160 122 L212 122 Q240 122 240 150 L240 198 Q240 214 226 222 L206 232 Q216 280 256 312 Q296 344 344 354 L354 334 Q362 320 378 320 L426 320 Q454 320 454 348 L454 400 Q454 428 426 428 Q272 420 168 316 Q132 212 132 166 Z" fill="#38bdf8"/>
+  <!-- speech lines -->
+  <path d="M300 120 Q330 150 300 180" stroke="#facc15" stroke-width="14" fill="none" stroke-linecap="round"/>
+  <path d="M350 90 Q400 150 350 210" stroke="#facc15" stroke-width="14" fill="none" stroke-linecap="round"/>
+</svg>
