@@ -196,10 +196,52 @@ export function SetupWizard({ player, onComplete }: Props) {
               Paste the API key from your ElevenLabs account. It's stored in
               this browser only. Don't use this app on a shared computer.
             </p>
+
+            <div className="bg-slate-800 border border-slate-700 rounded p-4 space-y-3">
+              <p className="text-sm text-slate-200 font-medium">
+                Don't have a key yet?
+              </p>
+              <ol className="text-sm text-slate-400 list-decimal ml-5 space-y-1">
+                <li>
+                  Open the{" "}
+                  <a
+                    href="https://elevenlabs.io/app/settings/api-keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sky-400 underline"
+                  >
+                    ElevenLabs API keys page
+                  </a>{" "}
+                  (sign in if prompted).
+                </li>
+                <li>
+                  Click <span className="text-slate-200">+ Create Key</span>.
+                </li>
+                <li>
+                  Give it a name like <em>Phone Bridge</em> and grant the{" "}
+                  <span className="text-slate-200">Text to Speech</span> and{" "}
+                  <span className="text-slate-200">Voices (read)</span>{" "}
+                  permissions.
+                </li>
+                <li>
+                  Copy the key — it's shown in full <strong>only once</strong>,
+                  right after you create it.
+                </li>
+              </ol>
+              <a
+                href="https://elevenlabs.io/app/settings/api-keys"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-block bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-2 rounded text-sm"
+              >
+                Open ElevenLabs API keys ↗
+              </a>
+            </div>
+
             <input
               type="password"
               className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-slate-100"
-              placeholder="sk_..."
+              placeholder="Paste your API key here (starts with sk_...)"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               autoComplete="off"
