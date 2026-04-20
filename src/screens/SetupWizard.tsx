@@ -6,7 +6,11 @@ import {
   primeDevicePermissions,
   type AudioDevice,
 } from "../lib/audioOutput";
-import { base64ToPCM16, type AudioPlayer } from "../lib/audioPlayer";
+import {
+  base64ToPCM16,
+  type AudioPlayer,
+  type PlayerState,
+} from "../lib/audioPlayer";
 import { listVoices, openSpeakStream, type Voice } from "../lib/elevenlabs";
 import {
   loadSettings,
@@ -51,6 +55,9 @@ export function SetupWizard({ player, onComplete }: Props) {
       : null,
   );
   const [fallbackDevices, setFallbackDevices] = useState<AudioDevice[]>([]);
+  const [sinkApplied, setSinkApplied] = useState<boolean>(() =>
+    player.getSinkStatus().applied,
+  );
   const hasNativePicker =
     typeof (
       navigator.mediaDevices as unknown as {
@@ -58,8 +65,15 @@ export function SetupWizard({ player, onComplete }: Props) {
       }
     ).selectAudioOutput === "function";
 
-  // Step 4 state
+  // Playback / diagnostics state
+  const [playerState, setPlayerState] = useState<PlayerState>(player.getState());
+  const [volume, setVolumeState] = useState<number>(player.getVolume());
   const [finalSpeaking, setFinalSpeaking] = useState(false);
+
+  useEffect(() => {
+    const unsub = player.onStateChange(setPlayerState);
+    return () => unsub();
+  }, [player]);
 
   useEffect(() => {
     if (step === 2 && !hasNativePicker) {
@@ -86,8 +100,10 @@ export function SetupWizard({ player, onComplete }: Props) {
   }
 
   // -------- Step 2: Voice preview --------
-  function previewVoice() {
+  async function previewVoice() {
     if (!voiceId) return;
+    // Ensure context is resumed by the same user gesture that triggered this.
+    await player.resume();
     setPreviewing(true);
     const stream = openSpeakStream({
       apiKey: apiKey.trim(),
@@ -115,31 +131,45 @@ export function SetupWizard({ player, onComplete }: Props) {
 
   // -------- Step 3: Output device --------
   async function chooseDeviceNative() {
+    // Resume context first — some browsers stop showing the picker if the
+    // context is suspended.
+    await player.resume();
     const picked = await pickOutputDevice();
     if (picked) {
       setDevice(picked);
-      await player.setSink(picked.deviceId);
+      const ok = await player.setSink(picked.deviceId);
+      setSinkApplied(ok);
     }
   }
 
   async function chooseDeviceFallback(deviceId: string) {
+    await player.resume();
     const d = fallbackDevices.find((x) => x.deviceId === deviceId) ?? null;
     if (d) {
       setDevice(d);
-      await player.setSink(d.deviceId);
+      const ok = await player.setSink(d.deviceId);
+      setSinkApplied(ok);
     }
   }
 
-  function playTestTone() {
-    // Generate a 1-second 440Hz sine wave at 16kHz and push through the player.
+  async function playTestTone() {
+    await player.resume();
+    // A short, friendly "di-daa" chirp — two tones so "silence vs ambient noise"
+    // is unambiguous even at low volume.
     const sampleRate = 16000;
-    const samples = sampleRate; // 1 second
-    const int16 = new Int16Array(samples);
-    for (let i = 0; i < samples; i++) {
-      // 0.4 amplitude to avoid clipping into the attenuator.
-      int16[i] = Math.round(
-        Math.sin((2 * Math.PI * 440 * i) / sampleRate) * 0.4 * 32767,
-      );
+    const total = sampleRate; // 1 second total
+    const int16 = new Int16Array(total);
+    // 0..0.4s at 660Hz, 0.5..0.9s at 880Hz, silence between.
+    for (let i = 0; i < total; i++) {
+      const t = i / sampleRate;
+      let hz = 0;
+      if (t < 0.4) hz = 660;
+      else if (t >= 0.5 && t < 0.9) hz = 880;
+      // 0.5 amplitude for clearly-audible test tone.
+      int16[i] =
+        hz === 0
+          ? 0
+          : Math.round(Math.sin(2 * Math.PI * hz * t) * 0.5 * 32767);
     }
     player.enqueuePCM16(int16);
     player.markStreamEnd();
@@ -152,7 +182,8 @@ export function SetupWizard({ player, onComplete }: Props) {
   }
 
   // -------- Step 4: End-to-end --------
-  function speakFinalTest() {
+  async function speakFinalTest() {
+    await player.resume();
     setFinalSpeaking(true);
     const stream = openSpeakStream({
       apiKey: apiKey.trim(),
@@ -174,6 +205,11 @@ export function SetupWizard({ player, onComplete }: Props) {
   function finishSetup() {
     markSetupCompleted();
     onComplete();
+  }
+
+  function onVolumeChange(v: number) {
+    player.setVolume(v);
+    setVolumeState(v);
   }
 
   const deviceWarn = device && looksLikeLaptopSpeakers(device.label);
@@ -293,7 +329,12 @@ export function SetupWizard({ player, onComplete }: Props) {
                 </option>
               ))}
             </select>
-            <div className="flex items-center gap-3">
+            <VolumeSlider value={volume} onChange={onVolumeChange} />
+            {playerState === "speaking" && (
+              <PlayingIndicator label="Playing preview..." />
+            )}
+            <div className="flex items-center gap-3 pt-2">
+              <BackButton onClick={() => setStep(0)} />
               <button
                 className="bg-slate-700 px-4 py-2 rounded text-sm disabled:opacity-50"
                 disabled={!voiceId || previewing}
@@ -320,7 +361,7 @@ export function SetupWizard({ player, onComplete }: Props) {
             <p className="text-sm text-slate-400">
               Pick the audio output that's plugged into the attenuator cable →
               phone. <span className="text-amber-300">Not</span> your laptop
-              speakers.
+              speakers (unless you're just testing without the hardware).
             </p>
 
             {hasNativePicker ? (
@@ -328,7 +369,7 @@ export function SetupWizard({ player, onComplete }: Props) {
                 className="bg-slate-700 px-4 py-2 rounded"
                 onClick={chooseDeviceNative}
               >
-                Choose output device...
+                {device ? "Change output device..." : "Choose output device..."}
               </button>
             ) : (
               <select
@@ -346,20 +387,43 @@ export function SetupWizard({ player, onComplete }: Props) {
             )}
 
             {device && (
-              <div
-                className={[
-                  "p-3 rounded text-sm",
-                  deviceWarn
-                    ? "bg-amber-500/20 border border-amber-500 text-amber-200"
-                    : "bg-slate-800 text-slate-200",
-                ].join(" ")}
-              >
-                {deviceWarn && <strong>⚠️ Looks like laptop speakers — </strong>}
-                Current: <code>{device.label}</code>
+              <div className="space-y-2">
+                <div
+                  className={[
+                    "p-3 rounded text-sm",
+                    deviceWarn
+                      ? "bg-amber-500/20 border border-amber-500 text-amber-200"
+                      : "bg-slate-800 text-slate-200",
+                  ].join(" ")}
+                >
+                  {deviceWarn && (
+                    <strong>⚠️ Looks like laptop speakers — </strong>
+                  )}
+                  Current: <code>{device.label || "(no label)"}</code>
+                </div>
+                <div className="text-xs text-slate-400 flex items-center gap-2">
+                  <span>Routing:</span>
+                  {sinkApplied ? (
+                    <span className="text-emerald-400">
+                      ✓ setSinkId applied
+                    </span>
+                  ) : (
+                    <span className="text-amber-400">
+                      ⚠ setSinkId not supported — audio will play through the
+                      browser's default output
+                    </span>
+                  )}
+                </div>
               </div>
             )}
 
-            <div className="flex items-center gap-3">
+            <VolumeSlider value={volume} onChange={onVolumeChange} />
+            {playerState === "speaking" && (
+              <PlayingIndicator label="Test tone playing..." />
+            )}
+
+            <div className="flex items-center gap-3 pt-2">
+              <BackButton onClick={() => setStep(1)} />
               <button
                 className="bg-slate-700 px-4 py-2 rounded text-sm disabled:opacity-50"
                 disabled={!device}
@@ -375,6 +439,30 @@ export function SetupWizard({ player, onComplete }: Props) {
                 Next: end-to-end test →
               </button>
             </div>
+
+            <details className="text-xs text-slate-500 mt-4">
+              <summary className="cursor-pointer">
+                Not hearing anything? Expand for troubleshooting
+              </summary>
+              <ul className="list-disc ml-5 mt-2 space-y-1">
+                <li>
+                  Check your system output volume (menu bar / volume shortcut).
+                </li>
+                <li>
+                  Some browsers mute tabs by default — click the speaker icon
+                  on the tab to unmute.
+                </li>
+                <li>
+                  Click <em>Change output device...</em> again and confirm you
+                  selected the right one.
+                </li>
+                <li>
+                  If Routing shows "not supported", your browser doesn't back
+                  AudioContext.setSinkId — audio goes to the browser's default
+                  output instead of the chosen device.
+                </li>
+              </ul>
+            </details>
           </section>
         )}
 
@@ -386,13 +474,20 @@ export function SetupWizard({ player, onComplete }: Props) {
               press Speak. Play the recording back; if it's clear and
               undistorted, you're done.
             </p>
-            <button
-              className="bg-sky-500 text-slate-900 px-4 py-2 rounded font-medium disabled:opacity-50"
-              disabled={finalSpeaking}
-              onClick={speakFinalTest}
-            >
-              {finalSpeaking ? "Speaking..." : "Speak test phrase"}
-            </button>
+            <VolumeSlider value={volume} onChange={onVolumeChange} />
+            {playerState === "speaking" && (
+              <PlayingIndicator label="Speaking test phrase..." />
+            )}
+            <div className="flex items-center gap-3">
+              <BackButton onClick={() => setStep(2)} />
+              <button
+                className="bg-sky-500 text-slate-900 px-4 py-2 rounded font-medium disabled:opacity-50"
+                disabled={finalSpeaking}
+                onClick={speakFinalTest}
+              >
+                {finalSpeaking ? "Speaking..." : "Speak test phrase"}
+              </button>
+            </div>
             <div className="flex items-center gap-3 pt-2">
               <button
                 className="bg-emerald-500 text-slate-900 px-4 py-2 rounded font-medium"
@@ -410,6 +505,55 @@ export function SetupWizard({ player, onComplete }: Props) {
           </section>
         )}
       </div>
+    </div>
+  );
+}
+
+function BackButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      className="text-slate-400 hover:text-slate-200 text-sm px-2 py-2"
+      onClick={onClick}
+    >
+      ← Back
+    </button>
+  );
+}
+
+function VolumeSlider({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-3 text-xs text-slate-400">
+      <span className="w-16">Volume</span>
+      <input
+        type="range"
+        min={0}
+        max={2}
+        step={0.05}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="flex-1 accent-sky-500"
+      />
+      <span className="w-12 text-right tabular-nums">
+        {Math.round(value * 100)}%
+      </span>
+    </div>
+  );
+}
+
+function PlayingIndicator({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-2 text-sky-300 text-sm">
+      <span className="relative flex h-2 w-2">
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
+        <span className="relative inline-flex rounded-full h-2 w-2 bg-sky-500"></span>
+      </span>
+      {label}
     </div>
   );
 }

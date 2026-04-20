@@ -7,44 +7,65 @@
  *   - Zero decode latency on each chunk.
  *   - Trivially cheap for phone-quality audio (16kHz * 16-bit = 32 KB/s).
  *
- * The scheduler maintains a single AudioContext at 16kHz, advances a
- * `nextStartTime` cursor as chunks arrive, and tracks live BufferSourceNodes
- * so cancellation can stop() them.
+ * Sample-rate strategy:
+ *   We DON'T force the AudioContext to 16kHz. Forcing it has caused silent
+ *   failures on Mac Chrome when setSinkId points at a 48kHz device. Instead,
+ *   the context uses the system rate, and each AudioBuffer is created at
+ *   16kHz — BufferSourceNode auto-resamples on playback, which is the
+ *   battle-tested path.
  */
 
 import { applySinkToAudioContext } from "./audioOutput";
 
 export type PlayerState = "idle" | "speaking";
 
+export interface SinkStatus {
+  applied: boolean;
+  deviceId: string;
+}
+
 export interface AudioPlayer {
   /** Apply (or re-apply) the chosen output device. */
   setSink(deviceId: string): Promise<boolean>;
+  /** Current sink state — whether setSinkId actually applied. */
+  getSinkStatus(): SinkStatus;
   /** Enqueue a chunk of PCM16LE @ 16kHz audio. */
   enqueuePCM16(int16: Int16Array): void;
   /** Called by the WebSocket client when streaming for an utterance is done. */
   markStreamEnd(): void;
   /** Stop playback immediately and drop any queued audio. */
   cancel(): void;
+  /** Set playback gain (0.0 .. ~4.0 — values above 1 amplify). */
+  setVolume(v: number): void;
+  /** Current gain value. */
+  getVolume(): number;
   /** Subscribe to state changes. */
   onStateChange(cb: (state: PlayerState) => void): () => void;
   /** Subscribe to "first chunk has actually started audibly playing" — used for latency measurement. */
   onFirstAudio(cb: () => void): () => void;
   /** Current state. */
   getState(): PlayerState;
+  /** Direct access to the context state for diagnostics. */
+  getContextState(): AudioContextState;
+  /** Ensure the context is running — call on user gesture. */
+  resume(): Promise<void>;
 }
 
-const SAMPLE_RATE = 16000;
+// Incoming audio sample rate from ElevenLabs (pcm_16000). AudioBuffer is
+// created at this rate and auto-resampled by the BufferSourceNode.
+const SOURCE_SAMPLE_RATE = 16000;
 
 export function createAudioPlayer(): AudioPlayer {
   // Long-lived context. Browsers require a user gesture before it transitions
-  // from "suspended" to "running" — that happens on the first Speak click.
-  const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+  // from "suspended" to "running" — that happens on the first wizard click.
+  const ctx = new AudioContext();
 
-  // A single gain node lets us optionally add volume control later without
-  // rewiring the graph.
+  // A single gain node lets us add volume control without rewiring the graph.
   const gain = ctx.createGain();
   gain.gain.value = 1;
   gain.connect(ctx.destination);
+
+  let sinkStatus: SinkStatus = { applied: false, deviceId: "" };
 
   let nextStartTime = 0;
   const liveSources = new Set<AudioBufferSourceNode>();
@@ -63,11 +84,33 @@ export function createAudioPlayer(): AudioPlayer {
 
   return {
     async setSink(deviceId: string) {
-      return applySinkToAudioContext(ctx, deviceId);
+      const ok = await applySinkToAudioContext(ctx, deviceId);
+      sinkStatus = { applied: ok, deviceId };
+      return ok;
+    },
+
+    getSinkStatus() {
+      return sinkStatus;
+    },
+
+    async resume() {
+      if (ctx.state !== "running") await ctx.resume();
+    },
+
+    setVolume(v: number) {
+      gain.gain.setValueAtTime(Math.max(0, v), ctx.currentTime);
+    },
+
+    getVolume() {
+      return gain.gain.value;
+    },
+
+    getContextState() {
+      return ctx.state;
     },
 
     enqueuePCM16(int16: Int16Array) {
-      if (ctx.state === "suspended") {
+      if (ctx.state !== "running") {
         void ctx.resume();
       }
 
@@ -77,7 +120,9 @@ export function createAudioPlayer(): AudioPlayer {
         float32[i] = int16[i] / 32768;
       }
 
-      const buffer = ctx.createBuffer(1, float32.length, SAMPLE_RATE);
+      // Buffer at the source rate (16kHz). BufferSourceNode will resample
+      // to ctx.sampleRate automatically during playback.
+      const buffer = ctx.createBuffer(1, float32.length, SOURCE_SAMPLE_RATE);
       buffer.copyToChannel(float32, 0);
 
       const source = ctx.createBufferSource();
