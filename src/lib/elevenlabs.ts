@@ -65,11 +65,12 @@ const OUTPUT_FORMAT = "pcm_16000";
 export function openSpeakStream(opts: StreamSpeakOptions): StreamHandle {
   const { apiKey, voiceId, onAudioChunk, onDone, onError } = opts;
 
+  // Auth goes in the first message body (see open handler); no xi_api_key
+  // in the URL to keep the key out of network / access logs.
   const url =
     `wss://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream-input` +
     `?model_id=${MODEL_ID}` +
-    `&output_format=${OUTPUT_FORMAT}` +
-    `&xi_api_key=${encodeURIComponent(apiKey)}`;
+    `&output_format=${OUTPUT_FORMAT}`;
 
   const ws = new WebSocket(url);
   let aborted = false;
@@ -82,8 +83,13 @@ export function openSpeakStream(opts: StreamSpeakOptions): StreamHandle {
     // Per ElevenLabs protocol the first frame sets voice / generation config.
     // We keep voice_settings close to defaults; `use_speaker_boost` off since
     // we're going into a phone line where boost adds unwanted harshness.
+    //
+    // Auth: xi_api_key goes in the first message body. Browser WebSocket API
+    // can't set custom headers, and the server has been rejecting query-string
+    // keys (`?xi_api_key=...`) with authentication_required since early 2026.
     const init = {
       text: " ",
+      xi_api_key: apiKey,
       voice_settings: {
         stability: 0.5,
         similarity_boost: 0.8,
