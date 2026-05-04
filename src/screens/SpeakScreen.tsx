@@ -37,6 +37,42 @@ interface Props {
 // firing prematurely.
 const AUTO_SEND_REGEX = /[.!?]\s$/;
 
+/**
+ * In realtime mode we send text to the ElevenLabs WebSocket as the user
+ * types — but ElevenLabs auto-pads every `send()` call with a trailing
+ * space, which means feeding it single characters causes the model to spell
+ * out each letter ("H E L L O") instead of saying the word.
+ *
+ * Fix: only ever send *complete words* through send(). We batch typed chars
+ * locally until we cross a word boundary (space, punctuation, newline), then
+ * push the whole word to the wire. This matches how the legacy press-Enter
+ * path always worked — it sends one big `send(utterance)` call where the
+ * trailing space pad is a no-op.
+ *
+ * Returns the index AFTER the last word-boundary character in `s`, or 0 if
+ * there is none. So findLastWordBoundary("Hello world") === 6, and any text
+ * before index 6 is "complete words ready to ship."
+ */
+function findLastWordBoundary(s: string): number {
+  for (let i = s.length - 1; i >= 0; i--) {
+    const c = s[i];
+    if (
+      c === " " ||
+      c === "\n" ||
+      c === "\t" ||
+      c === "," ||
+      c === "." ||
+      c === "!" ||
+      c === "?" ||
+      c === ";" ||
+      c === ":"
+    ) {
+      return i + 1;
+    }
+  }
+  return 0;
+}
+
 // Detect Chromium-style native audio output picker availability once.
 function hasNativeOutputPicker(): boolean {
   return (
@@ -247,7 +283,17 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
       idleTimerRef.current = null;
       const stream = realtimeStreamRef.current;
       if (!stream) return;
-      // Capture what's been spoken, mirror to lastUtterance for the Repeat button.
+      // Ship any uncommitted "in-flight" text (the partial word the user
+      // was typing when they paused) before closing — otherwise "Hello"
+      // would never make it to the wire because there's no word boundary
+      // after the last "o". We read the live textarea value rather than
+      // React state because the timeout callback captures stale state.
+      const liveText = textareaRef.current?.value ?? "";
+      if (liveText.length > realtimeBaseRef.current.length) {
+        const tail = liveText.slice(realtimeBaseRef.current.length);
+        if (tail.trim()) stream.send(tail);
+        realtimeBaseRef.current = liveText;
+      }
       const committed = realtimeBaseRef.current.trim();
       if (committed) setLastUtterance(committed);
       stream.flushAndClose();
@@ -274,6 +320,14 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     clearIdleTimer();
     const stream = realtimeStreamRef.current;
     if (stream) {
+      // Ship any uncommitted in-flight text (partial word past the last
+      // word boundary) before closing the stream.
+      const liveText = textareaRef.current?.value ?? "";
+      if (liveText.length > realtimeBaseRef.current.length) {
+        const tail = liveText.slice(realtimeBaseRef.current.length);
+        if (tail.trim()) stream.send(tail);
+        realtimeBaseRef.current = liveText;
+      }
       const committed = realtimeBaseRef.current.trim();
       if (committed) setLastUtterance(committed);
       stream.flushAndClose();
@@ -283,16 +337,19 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
   }, []);
 
   // ---------- Realtime text-change handler ----------
-  // Called from handleTextChange when realtimeMode is on. Implements the
-  // diff-and-dispatch policy described in the design doc:
-  //   - append → send the new chars through the stream
-  //   - backspace / mid-edit → abort and restart with the new text
-  //   - terminal punctuation → flush + close
+  // Called from handleTextChange when realtimeMode is on. The key invariant:
+  //   realtimeBaseRef.current === text that has been pushed to stream.send()
+  // Anything in the textarea past that pointer is "in flight" — typed but
+  // not yet shipped. We only ship complete words (text up to the last word
+  // boundary), because shipping mid-word causes ElevenLabs to spell letters.
+  //
+  // Cases:
+  //   - append → ship any new complete-word text past the last commit point
+  //   - terminal punctuation → ship remaining + flush + close stream
+  //   - backspace / mid-edit → abort, restart fresh with whatever's there
   function handleRealtimeTextChange(prev: string, next: string) {
-    // Trivial / no-op cases.
     if (next === prev) return;
 
-    // Empty buffer — nothing to do, just reset state.
     if (next.length === 0) {
       abortRealtimeStream();
       return;
@@ -301,22 +358,34 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     const isAppend = next.length > prev.length && next.startsWith(prev);
 
     if (isAppend) {
-      const appended = next.slice(prev.length);
+      // Ensure a stream is open. Note we do NOT send `next` here — that
+      // would ship partial words. Sending happens below at word boundaries.
       if (!realtimeStreamRef.current) {
-        // First keystroke of a fresh phrase — open a stream, then send.
-        // The send is non-blocking; the StreamHandle queues it until open.
-        openRealtimeStream().send(next);
-        realtimeBaseRef.current = next;
-      } else {
-        realtimeStreamRef.current.send(appended);
-        realtimeBaseRef.current += appended;
+        openRealtimeStream();
+        // openRealtimeStream resets realtimeBaseRef.current to "".
+      }
+      const stream = realtimeStreamRef.current!;
+
+      // Ship any newly-completed words. The boundary is the index after the
+      // last word-terminator char in `next`; everything before that is
+      // shippable, everything after is still being typed.
+      const boundary = findLastWordBoundary(next);
+      const baseLen = realtimeBaseRef.current.length;
+      if (boundary > baseLen) {
+        const toSend = next.slice(baseLen, boundary);
+        stream.send(toSend);
+        realtimeBaseRef.current = next.slice(0, boundary);
       }
 
-      // Terminal punctuation acts the same way auto-send does in legacy mode:
-      // it commits the phrase immediately. We do this regardless of the
-      // legacy autoSend toggle — in realtime mode, terminal punctuation is
-      // ALWAYS a commit boundary (the legacy toggle is dimmed in the UI).
+      // Terminal punctuation is a hard commit boundary — flush remaining
+      // (which by definition is just the trailing whitespace at this point,
+      // since we just shipped through `boundary`) and close the stream.
       if (AUTO_SEND_REGEX.test(next)) {
+        const tail = next.slice(realtimeBaseRef.current.length);
+        if (tail) {
+          stream.send(tail);
+          realtimeBaseRef.current = next;
+        }
         flushRealtimeNow();
         return;
       }
@@ -325,13 +394,18 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
       return;
     }
 
-    // Anything else — backspace, mid-text edit, paste-replace — is treated
-    // as "abandon and restart." Already-generated audio plays out; new audio
-    // generation begins fresh from the current text.
+    // Backspace / mid-edit / paste-replace → abandon and restart. Whatever
+    // was already generated plays out; new audio starts fresh.
     abortRealtimeStream();
     if (next.trim().length > 0) {
-      openRealtimeStream().send(next);
-      realtimeBaseRef.current = next;
+      openRealtimeStream();
+      const stream = realtimeStreamRef.current!;
+      // Ship complete words only.
+      const boundary = findLastWordBoundary(next);
+      if (boundary > 0) {
+        stream.send(next.slice(0, boundary));
+        realtimeBaseRef.current = next.slice(0, boundary);
+      }
       scheduleIdleFlush();
     }
   }
