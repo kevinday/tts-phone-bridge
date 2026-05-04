@@ -14,13 +14,9 @@ import {
   type AudioDevice,
 } from "../lib/audioOutput";
 import {
-  IDLE_FLUSH_MS_MAX,
-  IDLE_FLUSH_MS_MIN,
   saveAutoSendPunctuation,
-  saveIdleFlushMs,
   saveOutputDevice,
   saveQuickPhrases,
-  saveRealtimeMode,
   saveVoice,
   type Settings,
 } from "../lib/settings";
@@ -36,42 +32,6 @@ interface Props {
 // auto-send. Requiring the trailing space keeps things like "Mr. Smith" from
 // firing prematurely.
 const AUTO_SEND_REGEX = /[.!?]\s$/;
-
-/**
- * In realtime mode we send text to the ElevenLabs WebSocket as the user
- * types — but ElevenLabs auto-pads every `send()` call with a trailing
- * space, which means feeding it single characters causes the model to spell
- * out each letter ("H E L L O") instead of saying the word.
- *
- * Fix: only ever send *complete words* through send(). We batch typed chars
- * locally until we cross a word boundary (space, punctuation, newline), then
- * push the whole word to the wire. This matches how the legacy press-Enter
- * path always worked — it sends one big `send(utterance)` call where the
- * trailing space pad is a no-op.
- *
- * Returns the index AFTER the last word-boundary character in `s`, or 0 if
- * there is none. So findLastWordBoundary("Hello world") === 6, and any text
- * before index 6 is "complete words ready to ship."
- */
-function findLastWordBoundary(s: string): number {
-  for (let i = s.length - 1; i >= 0; i--) {
-    const c = s[i];
-    if (
-      c === " " ||
-      c === "\n" ||
-      c === "\t" ||
-      c === "," ||
-      c === "." ||
-      c === "!" ||
-      c === "?" ||
-      c === ";" ||
-      c === ":"
-    ) {
-      return i + 1;
-    }
-  }
-  return 0;
-}
 
 // Detect Chromium-style native audio output picker availability once.
 function hasNativeOutputPicker(): boolean {
@@ -97,11 +57,6 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
   const [autoSend, setAutoSend] = useState(settings.autoSendPunctuation);
   const [quickPhrases, setQuickPhrases] = useState(settings.quickPhrases);
   const [showEditor, setShowEditor] = useState(false);
-
-  // Realtime mode state — experimental "stream as you type" path. The legacy
-  // press-Enter path is unaffected when this is off.
-  const [realtimeMode, setRealtimeMode] = useState(settings.realtimeMode);
-  const [idleFlushMs, setIdleFlushMs] = useState(settings.idleFlushMs);
 
   // Output device — duplicated locally so the user can change it from the
   // typing screen (e.g., switching between phone cable and a virtual audio
@@ -129,28 +84,9 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const sendStartRef = useRef<number | null>(null);
-
-  // ----- Legacy (press-Enter / auto-send-on-punctuation) plumbing -----
-  // These refs and the `speak` / `speakOrQueue` callbacks below are the
-  // *exact* same code path that has been working in production. The realtime
-  // path is added alongside, never replaces.
   const activeStreamRef = useRef<StreamHandle | null>(null);
   // Queue for utterances received while a previous one is still streaming.
   const queueRef = useRef<string[]>([]);
-
-  // ----- Realtime stream plumbing -----
-  // A single long-lived stream that text is dripped into as the user types.
-  // Closed (flushAndClose) on terminal punctuation, Enter, idle, or unmount.
-  const realtimeStreamRef = useRef<StreamHandle | null>(null);
-  // The text already committed to the open realtime stream — used to compute
-  // diffs against the textarea value. Reset to "" whenever the stream resets.
-  const realtimeBaseRef = useRef<string>("");
-  // Idle-flush timer handle. Cleared on every keystroke, fires after the
-  // user-configured pause to commit the in-progress phrase.
-  const idleTimerRef = useRef<number | null>(null);
-  // Most-recent realtime mode value, accessible from cleanup callbacks.
-  const realtimeModeRef = useRef(realtimeMode);
-  realtimeModeRef.current = realtimeMode;
 
   // ---------- Effects ----------
   useEffect(() => {
@@ -173,19 +109,7 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     textareaRef.current?.focus();
   }, []);
 
-  // On unmount, cleanly tear down any open realtime stream and timers.
-  useEffect(() => {
-    return () => {
-      if (idleTimerRef.current !== null) {
-        window.clearTimeout(idleTimerRef.current);
-        idleTimerRef.current = null;
-      }
-      realtimeStreamRef.current?.abort();
-      realtimeStreamRef.current = null;
-    };
-  }, []);
-
-  // ---------- Legacy speak path (unchanged behavior) ----------
+  // ---------- Speak path ----------
   const speak = useCallback(
     (utterance: string) => {
       const trimmed = utterance.trim();
@@ -235,239 +159,37 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     [player, speak],
   );
 
-  // ---------- Realtime stream helpers ----------
-  // Opens a fresh realtime stream and stores it in realtimeStreamRef. Caller
-  // is responsible for sending text after this returns.
-  const openRealtimeStream = useCallback((): StreamHandle => {
-    sendStartRef.current = performance.now();
-    setError(null);
-    realtimeBaseRef.current = "";
-    const stream = openSpeakStream({
-      apiKey: settings.apiKey,
-      voiceId,
-      onAudioChunk: (b64) => player.enqueuePCM16(base64ToPCM16(b64)),
-      onDone: () => {
-        player.markStreamEnd();
-        // Only clear the ref if THIS is still the current stream — the user
-        // may have already aborted+reopened on a backspace.
-        if (realtimeStreamRef.current === stream) {
-          realtimeStreamRef.current = null;
-          realtimeBaseRef.current = "";
-        }
-      },
-      onError: (err) => {
-        setError(err.message);
-        if (realtimeStreamRef.current === stream) {
-          realtimeStreamRef.current = null;
-          realtimeBaseRef.current = "";
-        }
-      },
-    });
-    realtimeStreamRef.current = stream;
-    return stream;
-  }, [settings.apiKey, voiceId, player]);
-
-  // Cancel any pending idle flush — called whenever a fresh keystroke arrives
-  // or when we explicitly commit/abort.
-  function clearIdleTimer() {
-    if (idleTimerRef.current !== null) {
-      window.clearTimeout(idleTimerRef.current);
-      idleTimerRef.current = null;
-    }
-  }
-
-  // Schedule auto-flush of the in-progress realtime phrase.
-  const scheduleIdleFlush = useCallback(() => {
-    clearIdleTimer();
-    idleTimerRef.current = window.setTimeout(() => {
-      idleTimerRef.current = null;
-      const stream = realtimeStreamRef.current;
-      if (!stream) return;
-      // Ship any uncommitted "in-flight" text (the partial word the user
-      // was typing when they paused) before closing — otherwise "Hello"
-      // would never make it to the wire because there's no word boundary
-      // after the last "o". We read the live textarea value rather than
-      // React state because the timeout callback captures stale state.
-      const liveText = textareaRef.current?.value ?? "";
-      if (liveText.length > realtimeBaseRef.current.length) {
-        const tail = liveText.slice(realtimeBaseRef.current.length);
-        if (tail.trim()) stream.send(tail);
-        realtimeBaseRef.current = liveText;
-      }
-      const committed = realtimeBaseRef.current.trim();
-      if (committed) setLastUtterance(committed);
-      stream.flushAndClose();
-      // The stream's onDone clears realtimeStreamRef; we also clear the
-      // textarea so the next phrase starts fresh.
-      setText("");
-      realtimeBaseRef.current = "";
-    }, idleFlushMs);
-  }, [idleFlushMs]);
-
-  // Abort whatever realtime stream may be open. Used on backspace, on
-  // toggling realtime off, on Stop, etc. Audio already queued in the player
-  // continues — we deliberately don't cancel the player (jarring cut).
-  const abortRealtimeStream = useCallback(() => {
-    clearIdleTimer();
-    realtimeStreamRef.current?.abort();
-    realtimeStreamRef.current = null;
-    realtimeBaseRef.current = "";
-  }, []);
-
-  // Commit the current realtime phrase immediately (Enter key, terminal
-  // punctuation, quick phrase click, etc.). Idempotent if no stream is open.
-  const flushRealtimeNow = useCallback(() => {
-    clearIdleTimer();
-    const stream = realtimeStreamRef.current;
-    if (stream) {
-      // Ship any uncommitted in-flight text (partial word past the last
-      // word boundary) before closing the stream.
-      const liveText = textareaRef.current?.value ?? "";
-      if (liveText.length > realtimeBaseRef.current.length) {
-        const tail = liveText.slice(realtimeBaseRef.current.length);
-        if (tail.trim()) stream.send(tail);
-        realtimeBaseRef.current = liveText;
-      }
-      const committed = realtimeBaseRef.current.trim();
-      if (committed) setLastUtterance(committed);
-      stream.flushAndClose();
-    }
-    realtimeBaseRef.current = "";
-    setText("");
-  }, []);
-
-  // ---------- Realtime text-change handler ----------
-  // Called from handleTextChange when realtimeMode is on. The key invariant:
-  //   realtimeBaseRef.current === text that has been pushed to stream.send()
-  // Anything in the textarea past that pointer is "in flight" — typed but
-  // not yet shipped. We only ship complete words (text up to the last word
-  // boundary), because shipping mid-word causes ElevenLabs to spell letters.
-  //
-  // Cases:
-  //   - append → ship any new complete-word text past the last commit point
-  //   - terminal punctuation → ship remaining + flush + close stream
-  //   - backspace / mid-edit → abort, restart fresh with whatever's there
-  function handleRealtimeTextChange(prev: string, next: string) {
-    if (next === prev) return;
-
-    if (next.length === 0) {
-      abortRealtimeStream();
-      return;
-    }
-
-    const isAppend = next.length > prev.length && next.startsWith(prev);
-
-    if (isAppend) {
-      // Ensure a stream is open. Note we do NOT send `next` here — that
-      // would ship partial words. Sending happens below at word boundaries.
-      if (!realtimeStreamRef.current) {
-        openRealtimeStream();
-        // openRealtimeStream resets realtimeBaseRef.current to "".
-      }
-      const stream = realtimeStreamRef.current!;
-
-      // Ship any newly-completed words. The boundary is the index after the
-      // last word-terminator char in `next`; everything before that is
-      // shippable, everything after is still being typed.
-      const boundary = findLastWordBoundary(next);
-      const baseLen = realtimeBaseRef.current.length;
-      if (boundary > baseLen) {
-        const toSend = next.slice(baseLen, boundary);
-        stream.send(toSend);
-        realtimeBaseRef.current = next.slice(0, boundary);
-      }
-
-      // Terminal punctuation is a hard commit boundary — flush remaining
-      // (which by definition is just the trailing whitespace at this point,
-      // since we just shipped through `boundary`) and close the stream.
-      if (AUTO_SEND_REGEX.test(next)) {
-        const tail = next.slice(realtimeBaseRef.current.length);
-        if (tail) {
-          stream.send(tail);
-          realtimeBaseRef.current = next;
-        }
-        flushRealtimeNow();
-        return;
-      }
-
-      scheduleIdleFlush();
-      return;
-    }
-
-    // Backspace / mid-edit / paste-replace → abandon and restart. Whatever
-    // was already generated plays out; new audio starts fresh.
-    abortRealtimeStream();
-    if (next.trim().length > 0) {
-      openRealtimeStream();
-      const stream = realtimeStreamRef.current!;
-      // Ship complete words only.
-      const boundary = findLastWordBoundary(next);
-      if (boundary > 0) {
-        stream.send(next.slice(0, boundary));
-        realtimeBaseRef.current = next.slice(0, boundary);
-      }
-      scheduleIdleFlush();
-    }
-  }
-
   // ---------- Top-level event handlers ----------
   function handleSend() {
     const utterance = text.trim();
     if (!utterance) return;
-    if (realtimeModeRef.current) {
-      flushRealtimeNow();
-      return;
-    }
     setText("");
     textareaRef.current?.focus();
     void speakOrQueue(utterance);
   }
 
   function handleCancel() {
-    // Legacy stream cleanup
     activeStreamRef.current?.abort();
     activeStreamRef.current = null;
     queueRef.current = [];
     setQueued(0);
-    // Realtime stream cleanup
-    abortRealtimeStream();
-    setText("");
     player.cancel();
   }
 
   function handleRepeat() {
-    if (!lastUtterance) return;
-    // Repeat is always treated as a discrete utterance — flush any in-flight
-    // realtime phrase first, then play through the legacy path.
-    if (realtimeModeRef.current) flushRealtimeNow();
-    void speakOrQueue(lastUtterance);
+    if (lastUtterance) void speakOrQueue(lastUtterance);
   }
 
   function handleQuickPhrase(phrase: string) {
-    // Quick phrases are pre-canned, complete utterances. Use the legacy path
-    // for them in both modes — flushing any open realtime stream first so
-    // the patient's in-progress typing is committed first.
-    if (realtimeModeRef.current) flushRealtimeNow();
     void speakOrQueue(phrase);
   }
 
   function handleTextChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const next = e.target.value;
-    const prev = text;
-
-    if (realtimeModeRef.current) {
-      // Realtime path. The textarea is the source of truth — we always update
-      // it before any async work so the user sees their keystrokes register.
-      setText(next);
-      // Resume the audio context lazily on the same user gesture (typing).
-      // Browsers tolerate this; nothing else upstream awaits.
-      void player.resume();
-      handleRealtimeTextChange(prev, next);
-      return;
-    }
-
-    // Legacy path: trigger auto-send when user has just typed a sentence end.
-    if (autoSend && AUTO_SEND_REGEX.test(next) && !AUTO_SEND_REGEX.test(prev)) {
+    // Only trigger auto-send when the user is typing new characters at the
+    // end — not on e.g. pasting or cursor-in-middle edits. The cheapest heuristic
+    // is: the textarea ends with ".?! " now and didn't a moment ago.
+    if (autoSend && AUTO_SEND_REGEX.test(next) && !AUTO_SEND_REGEX.test(text)) {
       setText("");
       void speakOrQueue(next);
       return;
@@ -486,27 +208,9 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
   }
 
   function toggleAutoSend() {
-    // No-op when realtime is on — checkbox is rendered disabled, but guard
-    // here too in case a stale reference fires.
-    if (realtimeMode) return;
     const next = !autoSend;
     setAutoSend(next);
     saveAutoSendPunctuation(next);
-  }
-
-  function toggleRealtime() {
-    const next = !realtimeMode;
-    setRealtimeMode(next);
-    saveRealtimeMode(next);
-    // Cleanly tear down any open realtime stream when turning OFF, so we
-    // don't leave a half-spoken phrase mid-air.
-    if (!next) abortRealtimeStream();
-  }
-
-  function changeIdleFlush(ms: number) {
-    const clamped = Math.min(IDLE_FLUSH_MS_MAX, Math.max(IDLE_FLUSH_MS_MIN, ms));
-    setIdleFlushMs(clamped);
-    saveIdleFlushMs(clamped);
   }
 
   function onEditorSave(phrases: string[]) {
@@ -518,9 +222,6 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
   // ---------- Output device picker (main-screen flavor) ----------
   async function handleChangeOutput() {
     setOutputPickerError(null);
-    // Picking a new output is a "session-significant" event — flush any
-    // realtime phrase first so it doesn't keep streaming to the old device.
-    if (realtimeModeRef.current) flushRealtimeNow();
 
     if (nativePicker) {
       try {
@@ -571,9 +272,7 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
 
   // ---------- Voice picker (main-screen flavor) ----------
   // Toggle the inline picker open/closed. On first open, fetch the voices
-  // from ElevenLabs (cached for the rest of the session). Switching voices
-  // mid-utterance flushes the current realtime stream first to keep things
-  // tidy — the new voice takes effect on the next utterance.
+  // from ElevenLabs (cached for the rest of the session).
   async function handleToggleVoicePicker() {
     if (showVoicePicker) {
       setShowVoicePicker(false);
@@ -597,10 +296,6 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
   function chooseVoice(id: string) {
     const v = voices?.find((x) => x.voice_id === id);
     if (!v) return;
-    // Flush any in-flight realtime phrase so it finishes in the OLD voice
-    // rather than getting a voice mid-word — abrupt voice swaps within a
-    // single utterance sound jarring.
-    if (realtimeModeRef.current) flushRealtimeNow();
     setVoiceId(v.voice_id);
     setVoiceName(v.name);
     saveVoice(v.voice_id, v.name);
@@ -636,63 +331,18 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
           </span>
           {lastLatencyMs !== null && (
             <span>
-              {realtimeMode ? "First audio" : "TTFB"}:{" "}
-              <span className="text-slate-200">{lastLatencyMs}ms</span>
+              TTFB: <span className="text-slate-200">{lastLatencyMs}ms</span>
             </span>
           )}
-          <label
-            className={[
-              "flex items-center gap-1 select-none",
-              realtimeMode ? "opacity-40 cursor-not-allowed" : "cursor-pointer",
-            ].join(" ")}
-            title={
-              realtimeMode
-                ? "Always-on in real-time mode"
-                : "Auto-send when you finish a sentence with .?! + space"
-            }
-          >
+          <label className="flex items-center gap-1 cursor-pointer select-none">
             <input
               type="checkbox"
               checked={autoSend}
               onChange={toggleAutoSend}
-              disabled={realtimeMode}
               className="accent-sky-500"
             />
             <span>Auto-send on .?!</span>
           </label>
-          <label
-            className="flex items-center gap-1 cursor-pointer select-none"
-            title="Experimental: stream audio while you're still typing, instead of waiting for Enter / punctuation. May have rough edges around backspace and mid-sentence pauses."
-          >
-            <input
-              type="checkbox"
-              checked={realtimeMode}
-              onChange={toggleRealtime}
-              className="accent-amber-400"
-            />
-            <span>
-              Real-time{" "}
-              <span className="text-amber-400">(experimental)</span>
-            </span>
-          </label>
-          {realtimeMode && (
-            <label
-              className="flex items-center gap-1 select-none"
-              title={`Time to wait after typing pauses before committing the in-progress phrase to audio. Lower = faster reactions but may split a single thought into multiple utterances. Higher = better prosody but more silence between phrases. Range: ${IDLE_FLUSH_MS_MIN}-${IDLE_FLUSH_MS_MAX}ms.`}
-            >
-              <span>Idle flush:</span>
-              <input
-                type="number"
-                min={IDLE_FLUSH_MS_MIN}
-                max={IDLE_FLUSH_MS_MAX}
-                step={100}
-                value={idleFlushMs}
-                onChange={(e) => changeIdleFlush(Number(e.target.value))}
-                className="w-16 bg-slate-800 text-slate-100 rounded px-1 py-0.5 text-xs"
-              />
-              <span>ms</span>
-            </label>
-          )}
         </div>
         <button
           className="text-slate-400 hover:text-slate-200"
@@ -807,11 +457,9 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
         ref={textareaRef}
         className="flex-1 w-full bg-slate-900 text-slate-100 text-2xl sm:text-3xl p-6 resize-none outline-none leading-relaxed"
         placeholder={
-          realtimeMode
-            ? "Type — speech streams as you go. Punctuation or pause commits the phrase."
-            : autoSend
-              ? "Type — finish a sentence with .?! + space to auto-send, or press Enter."
-              : "Type what you want to say, then press Enter..."
+          autoSend
+            ? "Type — finish a sentence with .?! + space to auto-send, or press Enter."
+            : "Type what you want to say, then press Enter..."
         }
         value={text}
         onChange={handleTextChange}
@@ -837,22 +485,12 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
             ? queued > 0
               ? `Speaking — ${queued} queued`
               : "Speaking..."
-            : realtimeMode
-              ? "Commit  (Enter)"
-              : "Speak  (Enter)"}
+            : "Speak  (Enter)"}
         </button>
         <button
           className="bg-slate-700 text-slate-100 px-6 py-4 rounded font-medium disabled:opacity-30"
           onClick={handleCancel}
-          // In realtime mode, allow Stop whenever there's text in the buffer —
-          // even if no audio is playing yet (the user may want to abandon a
-          // phrase before it commits). The ref-based check we'd otherwise want
-          // (`realtimeStreamRef.current`) doesn't trigger re-renders.
-          disabled={
-            state === "idle" &&
-            queued === 0 &&
-            !(realtimeMode && text.length > 0)
-          }
+          disabled={state === "idle" && queued === 0}
           title="Esc"
         >
           Stop
