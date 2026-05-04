@@ -502,6 +502,50 @@ export function SetupWizard({ player, onComplete }: Props) {
                 Sounds bad — redo output step
               </button>
             </div>
+
+            <details className="bg-slate-800 border border-slate-700 rounded p-4 mt-6 text-sm">
+              <summary className="cursor-pointer text-slate-200 font-medium">
+                Want to use this with Teams, Google Meet, or Zoom too?
+              </summary>
+              <div className="mt-3 space-y-2 text-slate-400">
+                <p>
+                  This app's voice clone can speak through any conferencing app
+                  that lets you pick a microphone — by routing audio through a{" "}
+                  <em>virtual audio cable</em> instead of the physical phone
+                  cable.
+                </p>
+                <p className="text-slate-200 font-medium pt-1">
+                  Windows setup (one-time):
+                </p>
+                <ol className="list-decimal ml-5 space-y-1">
+                  <li>
+                    Install{" "}
+                    <a
+                      href="https://vb-audio.com/Cable/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sky-400 underline"
+                    >
+                      VB-Cable
+                    </a>{" "}
+                    (free) and reboot.
+                  </li>
+                  <li>
+                    Back in this app, go to <em>Settings</em> and pick{" "}
+                    <code className="text-slate-200">CABLE Input (VB-Audio)</code>{" "}
+                    as the output device.
+                  </li>
+                  <li>
+                    In Teams / Meet / Zoom, set the microphone to{" "}
+                    <code className="text-slate-200">CABLE Output (VB-Audio)</code>.
+                  </li>
+                </ol>
+                <p className="pt-2">
+                  You can keep your phone-cable output saved in Settings and
+                  switch back when you need to make a phone call.
+                </p>
+              </div>
+            </details>
           </section>
         )}
       </div>

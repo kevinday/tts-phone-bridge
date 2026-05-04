@@ -15,6 +15,17 @@ const KEY_OUTPUT_DEVICE_LABEL = "ttsb.outputDeviceLabel";
 const KEY_SETUP_COMPLETED = "ttsb.setupCompleted";
 const KEY_QUICK_PHRASES = "ttsb.quickPhrases";
 const KEY_AUTO_SEND_PUNCTUATION = "ttsb.autoSendPunctuation";
+const KEY_REALTIME_MODE = "ttsb.realtimeMode";
+const KEY_IDLE_FLUSH_MS = "ttsb.idleFlushMs";
+
+/**
+ * Default idle-flush window in realtime mode. Tuned by trial: 1.5s catches
+ * mid-sentence pauses without splitting thoughts. User can override.
+ */
+export const DEFAULT_IDLE_FLUSH_MS = 1500;
+/** Bounds for the user-configurable idle flush, to prevent absurd values. */
+export const IDLE_FLUSH_MS_MIN = 300;
+export const IDLE_FLUSH_MS_MAX = 5000;
 
 export interface Settings {
   apiKey: string;
@@ -25,6 +36,17 @@ export interface Settings {
   setupCompleted: boolean;
   quickPhrases: string[];
   autoSendPunctuation: boolean;
+  /**
+   * Experimental real-time mode: stream audio while the user is still typing,
+   * rather than waiting for Enter / sentence-ending punctuation. Off by
+   * default — opt-in via the status-bar toggle.
+   */
+  realtimeMode: boolean;
+  /**
+   * In realtime mode, how long to wait after the last keystroke before
+   * committing the in-progress phrase to audio. See DEFAULT_IDLE_FLUSH_MS.
+   */
+  idleFlushMs: number;
 }
 
 export const DEFAULT_QUICK_PHRASES = [
@@ -50,7 +72,19 @@ export function loadSettings(): Settings {
     // fluent typists. Users can disable via the status-bar toggle.
     autoSendPunctuation:
       (localStorage.getItem(KEY_AUTO_SEND_PUNCTUATION) ?? "true") === "true",
+    // Default OFF — experimental, must be explicitly opted into.
+    realtimeMode: localStorage.getItem(KEY_REALTIME_MODE) === "true",
+    idleFlushMs: loadIdleFlushMs(),
   };
+}
+
+function loadIdleFlushMs(): number {
+  const raw = localStorage.getItem(KEY_IDLE_FLUSH_MS);
+  if (!raw) return DEFAULT_IDLE_FLUSH_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_IDLE_FLUSH_MS;
+  // Clamp to bounds — protects against legacy / hand-edited localStorage values.
+  return Math.min(IDLE_FLUSH_MS_MAX, Math.max(IDLE_FLUSH_MS_MIN, Math.round(n)));
 }
 
 function loadQuickPhrases(): string[] {
@@ -95,4 +129,16 @@ export function saveQuickPhrases(phrases: string[]): void {
 
 export function saveAutoSendPunctuation(enabled: boolean): void {
   localStorage.setItem(KEY_AUTO_SEND_PUNCTUATION, enabled ? "true" : "false");
+}
+
+export function saveRealtimeMode(enabled: boolean): void {
+  localStorage.setItem(KEY_REALTIME_MODE, enabled ? "true" : "false");
+}
+
+export function saveIdleFlushMs(ms: number): void {
+  const clamped = Math.min(
+    IDLE_FLUSH_MS_MAX,
+    Math.max(IDLE_FLUSH_MS_MIN, Math.round(ms)),
+  );
+  localStorage.setItem(KEY_IDLE_FLUSH_MS, String(clamped));
 }
