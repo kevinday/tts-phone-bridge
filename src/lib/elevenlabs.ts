@@ -42,6 +42,13 @@ export async function listVoices(apiKey: string): Promise<Voice[]> {
 export interface StreamSpeakOptions {
   apiKey: string;
   voiceId: string;
+  /**
+   * Optional speech-rate multiplier. ElevenLabs accepts 0.7–1.2:
+   *   0.7 = slowest, 1.0 = default unchanged, 1.2 = fastest.
+   * Out-of-range values may be silently clamped or rejected by the server,
+   * so callers should validate before passing. Omit to use the default.
+   */
+  speed?: number;
   /** Fires for each decoded audio chunk. Caller converts base64→PCM & plays. */
   onAudioChunk: (base64Audio: string) => void;
   /** Fires when server says the utterance is complete. */
@@ -63,7 +70,7 @@ const MODEL_ID = "eleven_flash_v2_5";
 const OUTPUT_FORMAT = "pcm_16000";
 
 export function openSpeakStream(opts: StreamSpeakOptions): StreamHandle {
-  const { apiKey, voiceId, onAudioChunk, onDone, onError } = opts;
+  const { apiKey, voiceId, speed, onAudioChunk, onDone, onError } = opts;
 
   // Auth goes in the first message body (see open handler); no xi_api_key
   // in the URL to keep the key out of network / access logs.
@@ -88,14 +95,27 @@ export function openSpeakStream(opts: StreamSpeakOptions): StreamHandle {
     // Auth: xi_api_key goes in the first message body. Browser WebSocket API
     // can't set custom headers, and the server has been rejecting query-string
     // keys (`?xi_api_key=...`) with authentication_required since early 2026.
+    // Only include `speed` in voice_settings if the caller provided one —
+    // omitting it lets the server fall back to the default (1.0). Sending
+    // explicit `speed: 1` is harmless but unnecessary noise.
+    const voiceSettings: {
+      stability: number;
+      similarity_boost: number;
+      use_speaker_boost: boolean;
+      speed?: number;
+    } = {
+      stability: 0.5,
+      similarity_boost: 0.8,
+      use_speaker_boost: false,
+    };
+    if (typeof speed === "number" && Number.isFinite(speed)) {
+      voiceSettings.speed = speed;
+    }
+
     const init = {
       text: " ",
       xi_api_key: apiKey,
-      voice_settings: {
-        stability: 0.5,
-        similarity_boost: 0.8,
-        use_speaker_boost: false,
-      },
+      voice_settings: voiceSettings,
       generation_config: {
         // Chunk schedule: aggressive first chunk for low TTFB, then normal.
         chunk_length_schedule: [50, 120, 160, 290],

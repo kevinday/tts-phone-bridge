@@ -15,6 +15,17 @@ const KEY_OUTPUT_DEVICE_LABEL = "ttsb.outputDeviceLabel";
 const KEY_SETUP_COMPLETED = "ttsb.setupCompleted";
 const KEY_QUICK_PHRASES = "ttsb.quickPhrases";
 const KEY_AUTO_SEND_PUNCTUATION = "ttsb.autoSendPunctuation";
+const KEY_SPEED = "ttsb.speed";
+
+/**
+ * ElevenLabs speech-rate multiplier bounds. Per the API: values below 1.0
+ * slow the voice down (min 0.7), values above 1.0 speed it up (max 1.2),
+ * with 1.0 being the unmodified default. Extreme values can degrade audio
+ * quality, so we expose the whole range but suggest staying near 1.0.
+ */
+export const SPEED_MIN = 0.7;
+export const SPEED_MAX = 1.2;
+export const SPEED_DEFAULT = 1.0;
 
 export interface Settings {
   apiKey: string;
@@ -25,6 +36,8 @@ export interface Settings {
   setupCompleted: boolean;
   quickPhrases: string[];
   autoSendPunctuation: boolean;
+  /** Speech rate multiplier. See SPEED_MIN/MAX/DEFAULT. */
+  speed: number;
 }
 
 export const DEFAULT_QUICK_PHRASES = [
@@ -50,7 +63,18 @@ export function loadSettings(): Settings {
     // fluent typists. Users can disable via the status-bar toggle.
     autoSendPunctuation:
       (localStorage.getItem(KEY_AUTO_SEND_PUNCTUATION) ?? "true") === "true",
+    speed: loadSpeed(),
   };
+}
+
+function loadSpeed(): number {
+  const raw = localStorage.getItem(KEY_SPEED);
+  if (!raw) return SPEED_DEFAULT;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return SPEED_DEFAULT;
+  // Clamp — protects against legacy / hand-edited localStorage values that
+  // could otherwise feed an out-of-range number to the API.
+  return Math.min(SPEED_MAX, Math.max(SPEED_MIN, n));
 }
 
 function loadQuickPhrases(): string[] {
@@ -95,4 +119,11 @@ export function saveQuickPhrases(phrases: string[]): void {
 
 export function saveAutoSendPunctuation(enabled: boolean): void {
   localStorage.setItem(KEY_AUTO_SEND_PUNCTUATION, enabled ? "true" : "false");
+}
+
+export function saveSpeed(speed: number): void {
+  const clamped = Math.min(SPEED_MAX, Math.max(SPEED_MIN, speed));
+  // Round to 2 decimals — matches the slider step granularity and avoids
+  // localStorage strings like "0.7500000000000001" from float math.
+  localStorage.setItem(KEY_SPEED, (Math.round(clamped * 100) / 100).toString());
 }

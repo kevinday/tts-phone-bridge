@@ -14,9 +14,13 @@ import {
   type AudioDevice,
 } from "../lib/audioOutput";
 import {
+  SPEED_DEFAULT,
+  SPEED_MAX,
+  SPEED_MIN,
   saveAutoSendPunctuation,
   saveOutputDevice,
   saveQuickPhrases,
+  saveSpeed,
   saveVoice,
   type Settings,
 } from "../lib/settings";
@@ -82,6 +86,11 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
   const [loadingVoices, setLoadingVoices] = useState(false);
   const [voicePickerError, setVoicePickerError] = useState<string | null>(null);
 
+  // Speech-rate multiplier (0.7–1.2). 1.0 leaves the ElevenLabs default
+  // unchanged. Saved to localStorage on every change so it persists across
+  // sessions; the next openSpeakStream call picks up the latest value.
+  const [speed, setSpeed] = useState(settings.speed);
+
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const sendStartRef = useRef<number | null>(null);
   const activeStreamRef = useRef<StreamHandle | null>(null);
@@ -120,6 +129,10 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
       const stream = openSpeakStream({
         apiKey: settings.apiKey,
         voiceId,
+        // Only send `speed` when it differs from the API default — keeps the
+        // wire payload identical to the legacy behavior when the slider hasn't
+        // been moved.
+        speed: speed === SPEED_DEFAULT ? undefined : speed,
         onAudioChunk: (b64) => player.enqueuePCM16(base64ToPCM16(b64)),
         onDone: () => {
           player.markStreamEnd();
@@ -141,7 +154,7 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
       stream.send(trimmed);
       stream.flushAndClose();
     },
-    [settings.apiKey, voiceId, player],
+    [settings.apiKey, voiceId, speed, player],
   );
 
   const speakOrQueue = useCallback(
@@ -302,6 +315,17 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     setShowVoicePicker(false);
   }
 
+  function changeSpeed(next: number) {
+    // The slider is `step=0.05`, but float math sometimes produces values
+    // like 0.7500000000000001. Round to 2 decimals to keep the UI tidy and
+    // localStorage clean — saveSpeed also rounds, but doing it here keeps
+    // the React state value matching what we persist.
+    const rounded = Math.round(next * 100) / 100;
+    const clamped = Math.min(SPEED_MAX, Math.max(SPEED_MIN, rounded));
+    setSpeed(clamped);
+    saveSpeed(clamped);
+  }
+
   const wrongOutput = looksLikeLaptopSpeakers(outputDeviceLabel);
 
   return (
@@ -342,6 +366,25 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
               className="accent-sky-500"
             />
             <span>Auto-send on .?!</span>
+          </label>
+          <label
+            className="flex items-center gap-2 select-none"
+            title="Speech rate. 1.00× = unchanged. Below 1× is slower, above 1× is faster. Range: 0.7×–1.2×. Double-click to reset to default."
+          >
+            <span>Speed:</span>
+            <input
+              type="range"
+              min={SPEED_MIN}
+              max={SPEED_MAX}
+              step={0.05}
+              value={speed}
+              onChange={(e) => changeSpeed(Number(e.target.value))}
+              onDoubleClick={() => changeSpeed(SPEED_DEFAULT)}
+              className="w-24 accent-sky-500"
+            />
+            <span className="text-slate-200 tabular-nums w-10 text-right">
+              {speed.toFixed(2)}×
+            </span>
           </label>
         </div>
         <button
