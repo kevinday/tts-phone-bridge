@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { base64ToPCM16, type AudioPlayer, type PlayerState } from "../lib/audioPlayer";
-import { openSpeakStream, type StreamHandle } from "../lib/elevenlabs";
+import {
+  listVoices,
+  openSpeakStream,
+  type StreamHandle,
+  type Voice,
+} from "../lib/elevenlabs";
 import {
   listOutputDevices,
   looksLikeLaptopSpeakers,
@@ -16,6 +21,7 @@ import {
   saveOutputDevice,
   saveQuickPhrases,
   saveRealtimeMode,
+  saveVoice,
   type Settings,
 } from "../lib/settings";
 import { QuickPhrasesEditor } from "../components/QuickPhrasesEditor";
@@ -74,6 +80,16 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
   const [showFallbackDevices, setShowFallbackDevices] = useState(false);
   const [fallbackDevices, setFallbackDevices] = useState<AudioDevice[]>([]);
   const nativePicker = hasNativeOutputPicker();
+
+  // Voice — duplicated locally so the user can switch voice mid-session
+  // without re-running the wizard. The voice list is fetched lazily on the
+  // first time the picker opens, then cached in this component.
+  const [voiceId, setVoiceId] = useState(settings.voiceId);
+  const [voiceName, setVoiceName] = useState(settings.voiceName);
+  const [showVoicePicker, setShowVoicePicker] = useState(false);
+  const [voices, setVoices] = useState<Voice[] | null>(null);
+  const [loadingVoices, setLoadingVoices] = useState(false);
+  const [voicePickerError, setVoicePickerError] = useState<string | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const sendStartRef = useRef<number | null>(null);
@@ -143,7 +159,7 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
       setLastUtterance(trimmed);
       const stream = openSpeakStream({
         apiKey: settings.apiKey,
-        voiceId: settings.voiceId,
+        voiceId,
         onAudioChunk: (b64) => player.enqueuePCM16(base64ToPCM16(b64)),
         onDone: () => {
           player.markStreamEnd();
@@ -165,7 +181,7 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
       stream.send(trimmed);
       stream.flushAndClose();
     },
-    [settings.apiKey, settings.voiceId, player],
+    [settings.apiKey, voiceId, player],
   );
 
   const speakOrQueue = useCallback(
@@ -192,7 +208,7 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     realtimeBaseRef.current = "";
     const stream = openSpeakStream({
       apiKey: settings.apiKey,
-      voiceId: settings.voiceId,
+      voiceId,
       onAudioChunk: (b64) => player.enqueuePCM16(base64ToPCM16(b64)),
       onDone: () => {
         player.markStreamEnd();
@@ -213,7 +229,7 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     });
     realtimeStreamRef.current = stream;
     return stream;
-  }, [settings.apiKey, settings.voiceId, player]);
+  }, [settings.apiKey, voiceId, player]);
 
   // Cancel any pending idle flush — called whenever a fresh keystroke arrives
   // or when we explicitly commit/abort.
@@ -479,6 +495,44 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     }
   }
 
+  // ---------- Voice picker (main-screen flavor) ----------
+  // Toggle the inline picker open/closed. On first open, fetch the voices
+  // from ElevenLabs (cached for the rest of the session). Switching voices
+  // mid-utterance flushes the current realtime stream first to keep things
+  // tidy — the new voice takes effect on the next utterance.
+  async function handleToggleVoicePicker() {
+    if (showVoicePicker) {
+      setShowVoicePicker(false);
+      return;
+    }
+    setVoicePickerError(null);
+    setShowVoicePicker(true);
+    if (!voices && !loadingVoices && settings.apiKey) {
+      setLoadingVoices(true);
+      try {
+        const list = await listVoices(settings.apiKey);
+        setVoices(list);
+      } catch (err) {
+        setVoicePickerError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setLoadingVoices(false);
+      }
+    }
+  }
+
+  function chooseVoice(id: string) {
+    const v = voices?.find((x) => x.voice_id === id);
+    if (!v) return;
+    // Flush any in-flight realtime phrase so it finishes in the OLD voice
+    // rather than getting a voice mid-word — abrupt voice swaps within a
+    // single utterance sound jarring.
+    if (realtimeModeRef.current) flushRealtimeNow();
+    setVoiceId(v.voice_id);
+    setVoiceName(v.name);
+    saveVoice(v.voice_id, v.name);
+    setShowVoicePicker(false);
+  }
+
   const wrongOutput = looksLikeLaptopSpeakers(outputDeviceLabel);
 
   return (
@@ -486,9 +540,15 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
       {/* Status bar */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800 text-xs text-slate-400">
         <div className="flex items-center gap-4 flex-wrap">
-          <span>
-            Voice:{" "}
-            <span className="text-slate-200">{settings.voiceName || "—"}</span>
+          <span className="flex items-center gap-1">
+            <span>Voice:</span>
+            <button
+              className="text-slate-200 underline decoration-dotted hover:text-sky-300 underline-offset-2"
+              onClick={handleToggleVoicePicker}
+              title="Click to switch voice"
+            >
+              {voiceName || "—"}
+            </button>
           </span>
           <span className="flex items-center gap-1">
             <span>Output:</span>
@@ -567,6 +627,40 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
           Settings
         </button>
       </div>
+
+      {/* Inline voice picker — opened by clicking the voice name above. */}
+      {showVoicePicker && (
+        <div className="bg-slate-800 border-b border-slate-700 px-4 py-2 text-xs flex items-center gap-2 flex-wrap">
+          <span className="text-slate-400">Pick voice:</span>
+          {loadingVoices ? (
+            <span className="text-slate-400">Loading...</span>
+          ) : voicePickerError ? (
+            <span className="text-rose-300">Error: {voicePickerError}</span>
+          ) : voices ? (
+            <select
+              className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-100"
+              value={voiceId}
+              onChange={(e) => chooseVoice(e.target.value)}
+            >
+              <option value="">— Select —</option>
+              {voices.map((v) => (
+                <option key={v.voice_id} value={v.voice_id}>
+                  {v.name}
+                  {v.category === "cloned" ? "  (cloned)" : ""}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-slate-400">No voices loaded.</span>
+          )}
+          <button
+            className="text-slate-400 hover:text-slate-200"
+            onClick={() => setShowVoicePicker(false)}
+          >
+            Close
+          </button>
+        </div>
+      )}
 
       {/* Inline fallback output-device dropdown (Firefox / Safari path) */}
       {showFallbackDevices && (
