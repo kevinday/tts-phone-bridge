@@ -7,9 +7,9 @@ import {
   type Voice,
 } from "../lib/elevenlabs";
 import {
+  findBoundDevice,
   listOutputDevices,
-  looksLikeLaptopSpeakers,
-  pickOutputDevice,
+  looksLikeVirtualCable,
   primeDevicePermissions,
   type AudioDevice,
 } from "../lib/audioOutput";
@@ -18,10 +18,13 @@ import {
   SPEED_MAX,
   SPEED_MIN,
   saveAutoSendPunctuation,
+  saveBinding,
   saveOutputDevice,
   saveQuickPhrases,
   saveSpeed,
   saveVoice,
+  type BindingSlot,
+  type DeviceBinding,
   type Settings,
 } from "../lib/settings";
 import { QuickPhrasesEditor } from "../components/QuickPhrasesEditor";
@@ -37,15 +40,15 @@ interface Props {
 // firing prematurely.
 const AUTO_SEND_REGEX = /[.!?]\s$/;
 
-// Detect Chromium-style native audio output picker availability once.
-function hasNativeOutputPicker(): boolean {
-  return (
-    typeof (
-      navigator.mediaDevices as MediaDevices & {
-        selectAudioOutput?: () => unknown;
-      }
-    ).selectAudioOutput === "function"
-  );
+// How many recent utterances the on-screen history keeps. The patient can't
+// hear his own TTS on phone calls, so the history is his record of what was
+// actually said (and whether it played successfully).
+const HISTORY_MAX = 5;
+
+interface HistoryEntry {
+  id: number;
+  text: string;
+  status: "pending" | "ok" | "error";
 }
 
 export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
@@ -56,25 +59,41 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [lastUtterance, setLastUtterance] = useState<string>("");
 
+  // Recent utterances, oldest first. Entries are added when an utterance
+  // actually starts speaking and updated to ok/error when it finishes.
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const historyIdRef = useRef(0);
+  const historyEndRef = useRef<HTMLDivElement | null>(null);
+
   // Local-only mirrors so the UI updates immediately when the user flips them;
   // the persisted settings object is the source of truth on reload.
   const [autoSend, setAutoSend] = useState(settings.autoSendPunctuation);
   const [quickPhrases, setQuickPhrases] = useState(settings.quickPhrases);
   const [showEditor, setShowEditor] = useState(false);
 
-  // Output device — duplicated locally so the user can change it from the
-  // typing screen (e.g., switching between phone cable and a virtual audio
-  // cable for Teams/Meet) without bouncing through the wizard.
+  // Output device — changeable from the typing screen (switching between
+  // the phone chain and a virtual audio cable for Teams/Meet several times a
+  // day). The app always renders its own picker panel: selectAudioOutput
+  // isn't enabled by default in Edge/Chrome, so a native picker would never
+  // show for the patient anyway, and our own panel lets us offer the bound
+  // Phone/Meeting quick buttons and a curated list.
   const [outputDeviceId, setOutputDeviceId] = useState(settings.outputDeviceId);
   const [outputDeviceLabel, setOutputDeviceLabel] = useState(
     settings.outputDeviceLabel,
   );
   const [outputPickerError, setOutputPickerError] = useState<string | null>(null);
-  // Fallback (Firefox/Safari) state — populated lazily when the user clicks
-  // "Change..." on a non-Chromium browser.
-  const [showFallbackDevices, setShowFallbackDevices] = useState(false);
-  const [fallbackDevices, setFallbackDevices] = useState<AudioDevice[]>([]);
-  const nativePicker = hasNativeOutputPicker();
+  const [showOutputPanel, setShowOutputPanel] = useState(false);
+  const [devices, setDevices] = useState<AudioDevice[]>([]);
+  // Phone/Meeting quick-output bindings. Optional: when neither is bound the
+  // panel is just the (deduplicated) device list, same as before.
+  const [phoneBinding, setPhoneBinding] = useState<DeviceBinding | null>(
+    settings.phoneDevice,
+  );
+  const [meetingBinding, setMeetingBinding] = useState<DeviceBinding | null>(
+    settings.meetingDevice,
+  );
+  // When bindings exist the full list is collapsed behind "More devices…".
+  const [showAllDevices, setShowAllDevices] = useState(false);
 
   // Voice — duplicated locally so the user can switch voice mid-session
   // without re-running the wizard. The voice list is fetched lazily on the
@@ -118,6 +137,25 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     textareaRef.current?.focus();
   }, []);
 
+  // Keep the newest history entry in view.
+  useEffect(() => {
+    historyEndRef.current?.scrollIntoView({ block: "nearest" });
+  }, [history]);
+
+  // ---------- History helpers ----------
+  function pushHistory(text: string): number {
+    const id = ++historyIdRef.current;
+    const entry: HistoryEntry = { id, text, status: "pending" };
+    setHistory((prev) => [...prev, entry].slice(-HISTORY_MAX));
+    return id;
+  }
+
+  function setHistoryStatus(id: number, status: HistoryEntry["status"]) {
+    setHistory((prev) =>
+      prev.map((h) => (h.id === id ? { ...h, status } : h)),
+    );
+  }
+
   // ---------- Speak path ----------
   const speak = useCallback(
     (utterance: string) => {
@@ -126,6 +164,7 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
       sendStartRef.current = performance.now();
       setError(null);
       setLastUtterance(trimmed);
+      const historyId = pushHistory(trimmed);
       const stream = openSpeakStream({
         apiKey: settings.apiKey,
         voiceId,
@@ -137,6 +176,7 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
         onDone: () => {
           player.markStreamEnd();
           activeStreamRef.current = null;
+          setHistoryStatus(historyId, "ok");
           // If more utterances queued up, fire the next one.
           const next = queueRef.current.shift();
           setQueued(queueRef.current.length);
@@ -146,6 +186,7 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
           setError(err.message);
           player.cancel();
           activeStreamRef.current = null;
+          setHistoryStatus(historyId, "error");
           queueRef.current = [];
           setQueued(0);
         },
@@ -197,6 +238,10 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     void speakOrQueue(phrase);
   }
 
+  function handleHistoryClick(entry: HistoryEntry) {
+    void speakOrQueue(entry.text);
+  }
+
   function handleTextChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const next = e.target.value;
     // Only trigger auto-send when the user is typing new characters at the
@@ -232,55 +277,57 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     setShowEditor(false);
   }
 
-  // ---------- Output device picker (main-screen flavor) ----------
-  async function handleChangeOutput() {
-    setOutputPickerError(null);
+  // ---------- Output device panel ----------
+  const hasBindings = phoneBinding !== null || meetingBinding !== null;
+  const phoneDevice = findBoundDevice(devices, phoneBinding);
+  const meetingDevice = findBoundDevice(devices, meetingBinding);
 
-    if (nativePicker) {
-      try {
-        await player.resume();
-        const picked = await pickOutputDevice();
-        if (!picked) return; // user dismissed
-        const ok = await player.setSink(picked.deviceId);
-        setOutputDeviceId(picked.deviceId);
-        setOutputDeviceLabel(picked.label);
-        saveOutputDevice(picked.deviceId, picked.label);
-        if (!ok) {
-          setOutputPickerError(
-            "Browser couldn't apply the selection — audio may still play through the default output.",
-          );
-        }
-      } catch (err) {
-        setOutputPickerError(err instanceof Error ? err.message : String(err));
-      }
+  async function handleToggleOutputPanel() {
+    setOutputPickerError(null);
+    if (showOutputPanel) {
+      setShowOutputPanel(false);
       return;
     }
-
-    // Non-Chromium fallback — show an inline dropdown of audio outputs.
-    if (!showFallbackDevices) {
-      await primeDevicePermissions();
-      const devices = await listOutputDevices();
-      setFallbackDevices(devices);
-      setShowFallbackDevices(true);
-    } else {
-      setShowFallbackDevices(false);
-    }
+    await primeDevicePermissions();
+    setDevices(await listOutputDevices());
+    setShowAllDevices(false);
+    setShowOutputPanel(true);
   }
 
-  async function chooseFallbackOutput(deviceId: string) {
-    const d = fallbackDevices.find((x) => x.deviceId === deviceId);
-    if (!d) return;
+  async function selectDevice(device: AudioDevice, closePanel = true) {
     await player.resume();
-    const ok = await player.setSink(d.deviceId);
-    setOutputDeviceId(d.deviceId);
-    setOutputDeviceLabel(d.label);
-    saveOutputDevice(d.deviceId, d.label);
-    setShowFallbackDevices(false);
+    const ok = await player.setSink(device.deviceId);
+    setOutputDeviceId(device.deviceId);
+    setOutputDeviceLabel(device.label);
+    saveOutputDevice(device.deviceId, device.label);
+    if (closePanel) setShowOutputPanel(false);
     if (!ok) {
       setOutputPickerError(
         "Browser couldn't apply the selection — audio may still play through the default output.",
       );
     }
+  }
+
+  function isBoundTo(slot: BindingSlot, device: AudioDevice): boolean {
+    const bound = slot === "phone" ? phoneDevice : meetingDevice;
+    return bound?.deviceId === device.deviceId;
+  }
+
+  /** Toggle a device's binding for a slot (re-clicking the bound row unbinds). */
+  function toggleBinding(slot: BindingSlot, device: AudioDevice) {
+    const next = isBoundTo(slot, device)
+      ? null
+      : { deviceId: device.deviceId, label: device.label };
+    saveBinding(slot, next);
+    if (slot === "phone") setPhoneBinding(next);
+    else setMeetingBinding(next);
+  }
+
+  function isCurrent(device: AudioDevice | null): boolean {
+    if (!device) return false;
+    return (
+      device.deviceId === outputDeviceId || device.label === outputDeviceLabel
+    );
   }
 
   // ---------- Voice picker (main-screen flavor) ----------
@@ -326,8 +373,6 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     saveSpeed(clamped);
   }
 
-  const wrongOutput = looksLikeLaptopSpeakers(outputDeviceLabel);
-
   return (
     <div className="flex-1 flex flex-col">
       {/* Status bar */}
@@ -347,10 +392,14 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
             <span>Output:</span>
             <button
               className="text-slate-200 underline decoration-dotted hover:text-sky-300 underline-offset-2"
-              onClick={handleChangeOutput}
-              title="Click to change output device (e.g., switch between the phone cable and a virtual audio cable for Teams/Meet)"
+              onClick={handleToggleOutputPanel}
+              title="Click to change where the voice plays (phone cable or meeting)"
             >
-              {outputDeviceLabel || "—"}
+              {isCurrent(phoneDevice)
+                ? "📞 Phone call"
+                : isCurrent(meetingDevice)
+                  ? "💻 Meeting"
+                  : outputDeviceLabel || "—"}
             </button>
           </span>
           {lastLatencyMs !== null && (
@@ -387,12 +436,23 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
             </span>
           </label>
         </div>
-        <button
-          className="text-slate-400 hover:text-slate-200"
-          onClick={onOpenSettings}
-        >
-          Settings
-        </button>
+        <div className="flex items-center gap-3">
+          <a
+            className="text-slate-400 hover:text-slate-200"
+            href={`${import.meta.env.BASE_URL}guide.html`}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Usage instructions, hardware guide, troubleshooting"
+          >
+            Guide
+          </a>
+          <button
+            className="text-slate-400 hover:text-slate-200"
+            onClick={onOpenSettings}
+          >
+            Settings
+          </button>
+        </div>
       </div>
 
       {/* Inline voice picker — opened by clicking the voice name above. */}
@@ -429,35 +489,124 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
         </div>
       )}
 
-      {/* Inline fallback output-device dropdown (Firefox / Safari path) */}
-      {showFallbackDevices && (
-        <div className="bg-slate-800 border-b border-slate-700 px-4 py-2 text-xs flex items-center gap-2">
-          <span className="text-slate-400">Pick output:</span>
-          <select
-            className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-100"
-            value={outputDeviceId}
-            onChange={(e) => chooseFallbackOutput(e.target.value)}
-          >
-            <option value="">— Select —</option>
-            {fallbackDevices.map((d) => (
-              <option key={d.deviceId} value={d.deviceId}>
-                {d.label}
-              </option>
-            ))}
-          </select>
-          <button
-            className="text-slate-400 hover:text-slate-200"
-            onClick={() => setShowFallbackDevices(false)}
-          >
-            Close
-          </button>
-        </div>
-      )}
+      {/* Output panel — quick Phone/Meeting buttons (when bound) + device list. */}
+      {showOutputPanel && (
+        <div className="bg-slate-800 border-b border-slate-700 px-4 py-3 text-sm space-y-3">
+          {hasBindings && (
+            <div className="flex items-center gap-3 flex-wrap">
+              {phoneBinding && (
+                <QuickOutputButton
+                  label="📞 Phone call"
+                  device={phoneDevice}
+                  current={isCurrent(phoneDevice)}
+                  onClick={() => phoneDevice && void selectDevice(phoneDevice)}
+                />
+              )}
+              {meetingBinding && (
+                <QuickOutputButton
+                  label="💻 Meeting"
+                  device={meetingDevice}
+                  current={isCurrent(meetingDevice)}
+                  onClick={() =>
+                    meetingDevice && void selectDevice(meetingDevice)
+                  }
+                />
+              )}
+              <button
+                className="text-xs text-slate-400 hover:text-slate-200 underline underline-offset-2"
+                onClick={() => setShowAllDevices((v) => !v)}
+              >
+                {showAllDevices ? "Hide device list" : "More devices…"}
+              </button>
+              <button
+                className="text-xs text-slate-400 hover:text-slate-200 ml-auto"
+                onClick={() => setShowOutputPanel(false)}
+              >
+                Close
+              </button>
+            </div>
+          )}
 
-      {wrongOutput && (
-        <div className="bg-amber-500/20 border-b border-amber-500 text-amber-200 px-4 py-2 text-sm">
-          ⚠️ Current output looks like laptop speakers, not the phone cable.
-          Click the output name above to change it.
+          {(!hasBindings || showAllDevices) && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs text-slate-400">
+                <span>
+                  Pick where the voice plays. Use 📞/💻 to save a device as a
+                  quick button.
+                </span>
+                {!hasBindings && (
+                  <button
+                    className="hover:text-slate-200"
+                    onClick={() => setShowOutputPanel(false)}
+                  >
+                    Close
+                  </button>
+                )}
+              </div>
+              {devices.length === 0 && (
+                <div className="text-xs text-slate-400">No devices found.</div>
+              )}
+              {devices.map((d) => (
+                <div
+                  key={d.deviceId}
+                  className={[
+                    "flex items-center gap-2 rounded px-2 py-1",
+                    isCurrent(d) ? "bg-sky-500/15" : "hover:bg-slate-700/50",
+                  ].join(" ")}
+                >
+                  <button
+                    className="flex-1 text-left text-slate-100 hover:text-sky-300 truncate"
+                    onClick={() => void selectDevice(d)}
+                    title="Use this output"
+                  >
+                    {d.label}
+                    {isCurrent(d) && (
+                      <span className="text-sky-400 text-xs ml-2">
+                        ✓ current
+                      </span>
+                    )}
+                    {looksLikeVirtualCable(d.label) && (
+                      <span className="text-slate-400 text-xs ml-2">
+                        (virtual cable — good for meetings)
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    className={[
+                      "text-xs rounded px-1.5 py-0.5 border",
+                      isBoundTo("phone", d)
+                        ? "border-sky-500 bg-sky-500/20 text-sky-300"
+                        : "border-slate-600 text-slate-400 hover:text-slate-200",
+                    ].join(" ")}
+                    onClick={() => toggleBinding("phone", d)}
+                    title={
+                      isBoundTo("phone", d)
+                        ? "This is your Phone call device — click to unset"
+                        : "Save as your Phone call device"
+                    }
+                  >
+                    {isBoundTo("phone", d) ? "✓ 📞 Phone" : "Set 📞"}
+                  </button>
+                  <button
+                    className={[
+                      "text-xs rounded px-1.5 py-0.5 border",
+                      isBoundTo("meeting", d)
+                        ? "border-sky-500 bg-sky-500/20 text-sky-300"
+                        : "border-slate-600 text-slate-400 hover:text-slate-200",
+                    ].join(" ")}
+                    onClick={() => toggleBinding("meeting", d)}
+                    title={
+                      isBoundTo("meeting", d)
+                        ? "This is your Meeting device — click to unset"
+                        : "Save as your Meeting device"
+                    }
+                  >
+                    {isBoundTo("meeting", d) ? "✓ 💻 Meeting" : "Set 💻"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -494,6 +643,49 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
           ✎ Edit
         </button>
       </div>
+
+      {/* Recent messages — what was said (or failed). Click any to say again. */}
+      {history.length > 0 && (
+        <div className="px-4 py-2 border-b border-slate-800 max-h-36 overflow-y-auto">
+          {history.map((h, i) => {
+            const isNewest = i === history.length - 1;
+            return (
+              <button
+                key={h.id}
+                className={[
+                  "block w-full text-left rounded px-2 py-1 text-sm truncate hover:bg-slate-800",
+                  h.status === "error"
+                    ? "text-rose-300"
+                    : isNewest
+                      ? "text-slate-100"
+                      : "text-slate-500",
+                ].join(" ")}
+                onClick={() => handleHistoryClick(h)}
+                title={
+                  h.status === "error"
+                    ? "This didn't play — click to try again"
+                    : "Click to say this again"
+                }
+              >
+                <span className="mr-2">
+                  {h.status === "error"
+                    ? "⚠️"
+                    : h.status === "pending"
+                      ? "⏳"
+                      : "🔊"}
+                </span>
+                {h.text}
+                {h.status === "error" && (
+                  <span className="text-xs ml-2">
+                    — didn't play, click to retry
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          <div ref={historyEndRef} />
+        </div>
+      )}
 
       {/* Big textarea — the whole middle of the screen. */}
       <textarea
@@ -548,5 +740,45 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
         />
       )}
     </div>
+  );
+}
+
+function QuickOutputButton({
+  label,
+  device,
+  current,
+  onClick,
+}: {
+  label: string;
+  /** The matching connected device, or null if it isn't plugged in / present. */
+  device: AudioDevice | null;
+  current: boolean;
+  onClick: () => void;
+}) {
+  const connected = device !== null;
+  return (
+    <button
+      className={[
+        "px-4 py-3 rounded font-medium text-base",
+        current
+          ? "bg-sky-500 text-slate-900"
+          : connected
+            ? "bg-slate-700 hover:bg-slate-600 text-slate-100"
+            : "bg-slate-700/40 text-slate-500 cursor-not-allowed",
+      ].join(" ")}
+      onClick={onClick}
+      disabled={!connected}
+      title={
+        connected
+          ? `Switch output to ${device.label}`
+          : "Device not connected right now"
+      }
+    >
+      {label}
+      {current && <span className="ml-2 text-sm">✓</span>}
+      {!connected && (
+        <span className="block text-xs font-normal">not connected</span>
+      )}
+    </button>
   );
 }

@@ -1,11 +1,6 @@
 import { useEffect, useState } from "react";
-import {
-  listOutputDevices,
-  looksLikeLaptopSpeakers,
-  pickOutputDevice,
-  primeDevicePermissions,
-  type AudioDevice,
-} from "../lib/audioOutput";
+import { type AudioDevice } from "../lib/audioOutput";
+import { OnboardingOutputs } from "../components/OnboardingOutputs";
 import {
   base64ToPCM16,
   type AudioPlayer,
@@ -54,16 +49,9 @@ export function SetupWizard({ player, onComplete }: Props) {
         }
       : null,
   );
-  const [fallbackDevices, setFallbackDevices] = useState<AudioDevice[]>([]);
   const [sinkApplied, setSinkApplied] = useState<boolean>(() =>
     player.getSinkStatus().applied,
   );
-  const hasNativePicker =
-    typeof (
-      navigator.mediaDevices as unknown as {
-        selectAudioOutput?: () => unknown;
-      }
-    ).selectAudioOutput === "function";
 
   // Playback / diagnostics state
   const [playerState, setPlayerState] = useState<PlayerState>(player.getState());
@@ -74,15 +62,6 @@ export function SetupWizard({ player, onComplete }: Props) {
     const unsub = player.onStateChange(setPlayerState);
     return () => unsub();
   }, [player]);
-
-  useEffect(() => {
-    if (step === 2 && !hasNativePicker) {
-      // Firefox/Safari fallback: prime permission so labels populate.
-      void primeDevicePermissions().then(async () => {
-        setFallbackDevices(await listOutputDevices());
-      });
-    }
-  }, [step, hasNativePicker]);
 
   // -------- Step 1: API key --------
   async function testApiKey() {
@@ -130,26 +109,11 @@ export function SetupWizard({ player, onComplete }: Props) {
   }
 
   // -------- Step 3: Output device --------
-  async function chooseDeviceNative() {
-    // Resume context first — some browsers stop showing the picker if the
-    // context is suspended.
+  async function chooseDevice(d: AudioDevice) {
     await player.resume();
-    const picked = await pickOutputDevice();
-    if (picked) {
-      setDevice(picked);
-      const ok = await player.setSink(picked.deviceId);
-      setSinkApplied(ok);
-    }
-  }
-
-  async function chooseDeviceFallback(deviceId: string) {
-    await player.resume();
-    const d = fallbackDevices.find((x) => x.deviceId === deviceId) ?? null;
-    if (d) {
-      setDevice(d);
-      const ok = await player.setSink(d.deviceId);
-      setSinkApplied(ok);
-    }
+    setDevice(d);
+    const ok = await player.setSink(d.deviceId);
+    setSinkApplied(ok);
   }
 
   async function playTestTone() {
@@ -211,8 +175,6 @@ export function SetupWizard({ player, onComplete }: Props) {
     player.setVolume(v);
     setVolumeState(v);
   }
-
-  const deviceWarn = device && looksLikeLaptopSpeakers(device.label);
 
   return (
     <div className="flex-1 flex justify-center p-6 sm:p-10">
@@ -358,47 +320,14 @@ export function SetupWizard({ player, onComplete }: Props) {
             <h2 className="text-lg font-medium">
               Step 3 — Output device (to phone)
             </h2>
-            <p className="text-sm text-slate-400">
-              Pick the audio output that's plugged into the attenuator cable →
-              phone. <span className="text-amber-300">Not</span> your laptop
-              speakers (unless you're just testing without the hardware).
-            </p>
-
-            {hasNativePicker ? (
-              <button
-                className="bg-slate-700 px-4 py-2 rounded"
-                onClick={chooseDeviceNative}
-              >
-                {device ? "Change output device..." : "Choose output device..."}
-              </button>
-            ) : (
-              <select
-                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-slate-100"
-                value={device?.deviceId ?? ""}
-                onChange={(e) => chooseDeviceFallback(e.target.value)}
-              >
-                <option value="">— Select a device —</option>
-                {fallbackDevices.map((d) => (
-                  <option key={d.deviceId} value={d.deviceId}>
-                    {d.label}
-                  </option>
-                ))}
-              </select>
-            )}
+            <OnboardingOutputs
+              onUseDevice={(d) => void chooseDevice(d)}
+              currentDeviceId={device?.deviceId ?? ""}
+            />
 
             {device && (
               <div className="space-y-2">
-                <div
-                  className={[
-                    "p-3 rounded text-sm",
-                    deviceWarn
-                      ? "bg-amber-500/20 border border-amber-500 text-amber-200"
-                      : "bg-slate-800 text-slate-200",
-                  ].join(" ")}
-                >
-                  {deviceWarn && (
-                    <strong>⚠️ Looks like laptop speakers — </strong>
-                  )}
+                <div className="p-3 rounded text-sm bg-slate-800 text-slate-200">
                   Current: <code>{device.label || "(no label)"}</code>
                 </div>
                 <div className="text-xs text-slate-400 flex items-center gap-2">

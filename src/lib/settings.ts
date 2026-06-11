@@ -16,6 +16,8 @@ const KEY_SETUP_COMPLETED = "ttsb.setupCompleted";
 const KEY_QUICK_PHRASES = "ttsb.quickPhrases";
 const KEY_AUTO_SEND_PUNCTUATION = "ttsb.autoSendPunctuation";
 const KEY_SPEED = "ttsb.speed";
+const KEY_PHONE_DEVICE = "ttsb.phoneDevice";
+const KEY_MEETING_DEVICE = "ttsb.meetingDevice";
 
 /**
  * ElevenLabs speech-rate multiplier bounds. Per the API: values below 1.0
@@ -26,6 +28,12 @@ const KEY_SPEED = "ttsb.speed";
 export const SPEED_MIN = 0.7;
 export const SPEED_MAX = 1.2;
 export const SPEED_DEFAULT = 1.0;
+
+/** A device bound to one of the two quick-output slots. */
+export interface DeviceBinding {
+  deviceId: string;
+  label: string;
+}
 
 export interface Settings {
   apiKey: string;
@@ -38,6 +46,10 @@ export interface Settings {
   autoSendPunctuation: boolean;
   /** Speech rate multiplier. See SPEED_MIN/MAX/DEFAULT. */
   speed: number;
+  /** Device bound to the "Phone call" quick-output button (null = unbound). */
+  phoneDevice: DeviceBinding | null;
+  /** Device bound to the "Meeting" quick-output button (null = unbound). */
+  meetingDevice: DeviceBinding | null;
 }
 
 export const DEFAULT_QUICK_PHRASES = [
@@ -64,7 +76,27 @@ export function loadSettings(): Settings {
     autoSendPunctuation:
       (localStorage.getItem(KEY_AUTO_SEND_PUNCTUATION) ?? "true") === "true",
     speed: loadSpeed(),
+    phoneDevice: loadBinding(KEY_PHONE_DEVICE),
+    meetingDevice: loadBinding(KEY_MEETING_DEVICE),
   };
+}
+
+function loadBinding(key: string): DeviceBinding | null {
+  const raw = localStorage.getItem(key);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as DeviceBinding;
+    if (
+      parsed &&
+      typeof parsed.deviceId === "string" &&
+      typeof parsed.label === "string"
+    ) {
+      return parsed;
+    }
+  } catch {
+    /* fall through */
+  }
+  return null;
 }
 
 function loadSpeed(): number {
@@ -119,6 +151,20 @@ export function saveQuickPhrases(phrases: string[]): void {
 
 export function saveAutoSendPunctuation(enabled: boolean): void {
   localStorage.setItem(KEY_AUTO_SEND_PUNCTUATION, enabled ? "true" : "false");
+}
+
+export type BindingSlot = "phone" | "meeting";
+
+export function saveBinding(
+  slot: BindingSlot,
+  binding: DeviceBinding | null,
+): void {
+  const key = slot === "phone" ? KEY_PHONE_DEVICE : KEY_MEETING_DEVICE;
+  if (binding) {
+    localStorage.setItem(key, JSON.stringify(binding));
+  } else {
+    localStorage.removeItem(key);
+  }
 }
 
 export function saveSpeed(speed: number): void {

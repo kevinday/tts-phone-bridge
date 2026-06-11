@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TTS Phone Bridge — Guide</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; padding: 0;
+      background: #0f172a; color: #e2e8f0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.6;
+    }
+    main { max-width: 46rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+    h2 { font-size: 1.2rem; margin-top: 2.5rem; border-bottom: 1px solid #1e293b; padding-bottom: 0.35rem; }
+    h3 { font-size: 1rem; margin-top: 1.5rem; color: #cbd5e1; }
+    p, li { color: #94a3b8; }
+    strong, b { color: #e2e8f0; }
+    a { color: #38bdf8; }
+    code, pre {
+      background: #1e293b; border-radius: 4px; padding: 0.1rem 0.35rem;
+      color: #e2e8f0; font-size: 0.9em;
+    }
+    pre { padding: 0.75rem 1rem; overflow-x: auto; line-height: 1.45; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+    th, td { border: 1px solid #1e293b; padding: 0.45rem 0.6rem; text-align: left; color: #94a3b8; }
+    th { color: #e2e8f0; background: #1e293b; }
+    .note {
+      background: rgba(56, 189, 248, 0.08); border: 1px solid #0ea5e9;
+      border-radius: 6px; padding: 0.7rem 1rem; margin: 1rem 0;
+    }
+    .top { font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="top"><a href="./">← Back to the app</a></p>
+  <h1>TTS Phone Bridge — Guide</h1>
+  <p>
+    This app lets you take part in phone calls and video meetings using a
+    synthesized clone of your own voice. You type; the other person hears you
+    speak.
+  </p>
+
+  <h2>Daily use</h2>
+  <ul>
+    <li><strong>Type and press Enter</strong> — your text is spoken right away.</li>
+    <li><strong>Auto-send</strong> — with "Auto-send on .?!" checked, finishing a
+      sentence with a period, question mark, or exclamation point (plus a space)
+      sends it automatically, so you never touch Enter mid-conversation.</li>
+    <li><strong>Quick phrases</strong> — one-click buttons for common replies
+      ("Yes", "Could you repeat that?"). Click <em>✎ Edit</em> to customize.</li>
+    <li><strong>Recent messages</strong> — the strip above the typing area shows
+      the last few things you said. 🔊 means it played; ⚠️ means it failed and the
+      other person did <em>not</em> hear it. Click any line to say it again.</li>
+    <li><strong>Repeat</strong> — re-plays your last message. <strong>Stop</strong>
+      (or Esc) cuts off speech immediately.</li>
+    <li><strong>Speed</strong> — slider in the top bar, 0.7×–1.2×. Double-click to
+      reset. Most people like 0.85–0.95×; the extremes can degrade audio quality.</li>
+  </ul>
+
+  <h2>Choosing where the voice plays (Output)</h2>
+  <p>
+    Click the <strong>Output</strong> name in the top bar. If you've saved your
+    devices, you'll see two buttons — <strong>📞 Phone call</strong> and
+    <strong>💻 Meeting</strong> — and switching takes one click. "More devices…"
+    shows the full list, where the 📞/💻 buttons next to each device let you save
+    it as a quick button.
+  </p>
+
+  <h2>Setup for phone calls (hardware)</h2>
+  <p>
+    Phone calls need a wired path from the computer into the phone. The
+    recommended chain (verified working with a Google Pixel):
+  </p>
+  <pre>Computer headphone jack (3.5mm)
+   ↓ 3.5mm cable
+Attenuator cable (-30dB)        ← drops line level down to mic level
+   ↓
+USB-C audio interface, MIC IN   (Saramonic SR-EA2U, ~$45)
+   ↓ its USB-C plug
+Android phone</pre>
+  <p>
+    Your earbuds plug into the interface's <strong>HEADPHONE OUT</strong> jack —
+    that's where you hear the caller.
+  </p>
+  <table>
+    <tr><th>Part</th><th>Purpose</th></tr>
+    <tr><td>Saramonic SR-EA2U USB-C audio interface</td>
+        <td>The phone sees it as a USB headset, so call audio routes through it — both directions.</td></tr>
+    <tr><td>Line-to-mic attenuator cable (e.g. Cubilux, switchable -10/-20/-30dB)</td>
+        <td>The computer's headphone output is ~30× too loud for a mic input; this drops it down. Start at -30dB.</td></tr>
+    <tr><td>3.5mm aux cable</td><td>Computer → attenuator.</td></tr>
+    <tr><td>Wired earbuds</td><td>Plug into the SR-EA2U to hear the caller.</td></tr>
+  </table>
+  <div class="note">
+    <strong>Phone compatibility:</strong> Google Pixel phones route cellular-call
+    audio through USB audio devices reliably. Samsung phones generally do
+    <em>not</em> — they restrict call audio to approved headsets. Test with a
+    voice-memo recording before relying on it for a real call.
+  </div>
+  <h3>First-time test</h3>
+  <ol>
+    <li>Connect everything, select the output in the app (📞 Phone call).</li>
+    <li>Record a voice memo on the phone while playing TTS from the app.</li>
+    <li>Distorted? Use more attenuation (-30dB) or lower computer volume.
+        Too quiet? Less attenuation (-20dB) or raise computer volume.</li>
+    <li>Then do a live test call with a friend.</li>
+  </ol>
+
+  <h2>Setup for Teams / Google Meet / Zoom</h2>
+  <p>
+    Meetings don't use the phone hardware at all — the voice is routed in
+    software through a <em>virtual audio cable</em>, which the meeting app reads
+    as your microphone.
+  </p>
+  <h3>Windows (one-time install)</h3>
+  <ol>
+    <li>Install <a href="https://vb-audio.com/Cable/" target="_blank" rel="noopener">VB-Cable</a>
+      (free), as Administrator, and reboot.</li>
+    <li>In this app: Output → <code>CABLE Input (VB-Audio Virtual Cable)</code>
+      — save it as your 💻 Meeting device.</li>
+    <li>In Teams/Meet/Zoom: set the <strong>microphone</strong> to
+      <code>CABLE Output (VB-Audio Virtual Cable)</code>.</li>
+  </ol>
+  <h3>Hearing your own voice in meetings (optional)</h3>
+  <p>
+    Install <a href="https://vb-audio.com/Voicemeeter/" target="_blank" rel="noopener">VoiceMeeter</a>
+    (free) and set its outputs: A1 → CABLE Input, A2 → your headphones, with both
+    A1+A2 lit on the VoiceMeeter Input strip. Then set this app's output to
+    <code>VoiceMeeter Input</code> instead. Your voice goes to the meeting and
+    your headphones at the same time.
+  </p>
+  <h3>Mac</h3>
+  <p>
+    Use <a href="https://existential.audio/blackhole/" target="_blank" rel="noopener">BlackHole</a>
+    (free, 2ch) as the virtual cable: app output → <code>BlackHole 2ch</code>,
+    meeting microphone → <code>BlackHole 2ch</code>.
+  </p>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <tr><th>Problem</th><th>Try this</th></tr>
+    <tr>
+      <td>Caller hears nothing (phone)</td>
+      <td>Check the app's Output is the phone chain (📞). Check every cable is
+        fully seated, especially attenuator → MIC IN. Confirm the phone shows a
+        headset/USB-audio icon during the call.</td>
+    </tr>
+    <tr>
+      <td>Meeting hears nothing</td>
+      <td>App Output must be the virtual cable (💻), and the meeting's
+        <em>microphone</em> must be the matching cable device (e.g. CABLE
+        Output). Both must be set — they're two halves of one wire.</td>
+    </tr>
+    <tr>
+      <td>Voice is distorted/crackly</td>
+      <td>Lower the computer volume or increase attenuation (-30dB).</td>
+    </tr>
+    <tr>
+      <td>Voice too quiet for the caller</td>
+      <td>Raise computer volume or reduce attenuation (-20dB).</td>
+    </tr>
+    <tr>
+      <td>You can't hear the caller</td>
+      <td>Earbuds go in the SR-EA2U's HEADPHONE OUT, not the computer. Check its
+        headphone volume dial.</td>
+    </tr>
+    <tr>
+      <td>A message shows ⚠️ in Recent messages</td>
+      <td>It never played — the other person didn't hear it. Click it to retry.
+        If it keeps failing, check your internet connection and ElevenLabs key.</td>
+    </tr>
+    <tr>
+      <td>Hum/buzz on calls</td>
+      <td>Likely a ground loop. A 3.5mm ground-loop isolator (~$10) in the chain
+        fixes it.</td>
+    </tr>
+    <tr>
+      <td>Device names are blank in the picker</td>
+      <td>The browser hides names until microphone permission is granted once —
+        allow it when prompted (the app never records).</td>
+    </tr>
+  </table>
+
+  <h2>Good to know</h2>
+  <ul>
+    <li>There's a ~0.3–0.5s delay between sending and the voice starting — the
+      time the voice synthesis takes. The TTFB number in the top bar shows it.</li>
+    <li>Your ElevenLabs API key is stored only in this browser. Don't use the
+      app on a shared computer.</li>
+    <li>The app works offline as an installed PWA, but speaking requires an
+      internet connection (the voice is synthesized in the cloud).</li>
+  </ul>
+
+  <p class="top" style="margin-top:3rem"><a href="./">← Back to the app</a></p>
+</main>
+</body>
+</html>
