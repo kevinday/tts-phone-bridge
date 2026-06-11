@@ -48,7 +48,9 @@ export default defineConfig({
       workbox: {
         // Never cache ElevenLabs API responses or the WebSocket handshake —
         // we always want fresh voices and a live socket.
-        navigateFallbackDenylist: [/^\/api\//, /elevenlabs\.io/],
+        // guide.html is a real standalone page — without the denylist entry the
+        // SPA navigation fallback would serve index.html in its place.
+        navigateFallbackDenylist: [/^\/api\//, /elevenlabs\.io/, /guide\.html$/],
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/api\.elevenlabs\.io\/.*/,
