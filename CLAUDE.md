@@ -1,5 +1,14 @@
 # ALS Patient: Text-to-Voice Phone Call Project
 
+## Read first
+
+The hardware setup below is the **April 2026 plan** and has since changed substantially. For the current state of the project, read these two files before doing any work:
+
+- **`Project Summary.md`** — full project history, why the original hardware chain failed (Android mic detection requires a ~2.2kΩ load that the Cubilux didn't provide), the move to the Saramonic SR-EA2U USB-C audio interface, the current end-to-end working chain, the TTS app's architecture and feature set, and a list of things tried and abandoned (e.g., the real-time "stream as you type" mode that was rolled back).
+- **`Self-Monitor Setup Guide.md`** — Teams/Google Meet/Zoom setup via VB-Cable + VoiceMeeter on Windows, and the planned (not yet purchased) hardware mixer for letting the user hear his own voice during phone calls.
+
+The notes below are preserved for historical reference.
+
 ## Goal
 An ALS patient who can no longer speak but types quickly needs to participate in normal phone calls on Android. They type on a computer → ElevenLabs (with their voice clone) synthesizes speech → the caller hears that synthesized voice through the phone call. The patient hears the other party through earbuds.
 
