@@ -6,7 +6,13 @@ import {
   type AudioPlayer,
   type PlayerState,
 } from "../lib/audioPlayer";
-import { listVoices, openSpeakStream, type Voice } from "../lib/elevenlabs";
+import {
+  ElevenLabsError,
+  listVoices,
+  looksLikeApiKey,
+  openSpeakStream,
+  type Voice,
+} from "../lib/elevenlabs";
 import {
   loadSettings,
   markSetupCompleted,
@@ -33,7 +39,10 @@ export function SetupWizard({ player, onComplete }: Props) {
   // Step 1 state
   const [apiKey, setApiKey] = useState(initial.apiKey);
   const [testing, setTesting] = useState(false);
-  const [apiError, setApiError] = useState<string | null>(null);
+  const [apiError, setApiError] = useState<{
+    message: string;
+    detail?: string;
+  } | null>(null);
   const [voices, setVoices] = useState<Voice[] | null>(null);
 
   // Step 2 state
@@ -72,7 +81,15 @@ export function SetupWizard({ player, onComplete }: Props) {
       setVoices(vs);
       saveApiKey(apiKey.trim());
     } catch (err) {
-      setApiError(err instanceof Error ? err.message : String(err));
+      // ElevenLabsError carries a plain-language message plus the server's
+      // own words — show both so "401" is never the whole story again.
+      if (err instanceof ElevenLabsError) {
+        setApiError({ message: err.message, detail: err.serverDetail });
+      } else {
+        setApiError({
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
     } finally {
       setTesting(false);
     }
@@ -241,9 +258,31 @@ export function SetupWizard({ player, onComplete }: Props) {
               className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-slate-100"
               placeholder="Paste your API key here (starts with sk_...)"
               value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
+              onChange={(e) => {
+                setApiKey(e.target.value);
+                // Editing the key invalidates the previous successful test —
+                // require a fresh "Test connection" before advancing (the
+                // preview/test steps use this field's value directly).
+                setVoices(null);
+                setApiError(null);
+              }}
               autoComplete="off"
             />
+            {apiKey.trim() !== "" && !looksLikeApiKey(apiKey) && (
+              <div className="bg-amber-500/10 border border-amber-500/60 rounded p-3 text-sm text-amber-200 space-y-1">
+                <p className="font-medium">
+                  ⚠ This doesn't look like an API key.
+                </p>
+                <p>
+                  API keys start with <code>sk_</code> and are shown only once
+                  — right after the key is created. If you used{" "}
+                  <em>Copy key ID</em> on the API-keys page, that value won't
+                  work: go back and create a new key, then copy the{" "}
+                  <code>sk_</code> value it shows. (You can still press{" "}
+                  <em>Test connection</em> to let ElevenLabs check this value.)
+                </p>
+              </div>
+            )}
             <div className="flex items-center gap-3">
               <button
                 className="bg-sky-500 text-slate-900 px-4 py-2 rounded font-medium disabled:opacity-50"
@@ -257,10 +296,17 @@ export function SetupWizard({ player, onComplete }: Props) {
                   ✓ Connected — {voices.length} voices found
                 </span>
               )}
-              {apiError && (
-                <span className="text-rose-400 text-sm">{apiError}</span>
-              )}
             </div>
+            {apiError && (
+              <div className="bg-rose-500/10 border border-rose-500/60 rounded p-3 text-sm text-rose-200 space-y-1">
+                <p>{apiError.message}</p>
+                {apiError.detail && apiError.detail !== apiError.message && (
+                  <p className="text-xs text-rose-300/80 break-words">
+                    Server said: {apiError.detail}
+                  </p>
+                )}
+              </div>
+            )}
             {voices && (
               <button
                 className="bg-slate-700 px-4 py-2 rounded text-sm"

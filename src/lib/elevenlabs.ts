@@ -27,16 +27,182 @@ export interface Voice {
   category?: string; // "cloned" | "premade" | ...
 }
 
-/** Fetch all voices available to this API key. Used in the setup wizard. */
+/**
+ * Error with enough structure for the UI to react helpfully.
+ *
+ * Motivated by the Aug 2026 outage: the app surfaced only "401" / a fast-
+ * scrolling WebSocket close reason, which made a pure credentials problem
+ * look like a broken app. We now parse ElevenLabs' structured error bodies
+ * (REST) and close reasons (WebSocket), translate the common cases into
+ * plain language, and keep the raw server text in `serverDetail`.
+ */
+export class ElevenLabsError extends Error {
+  /** HTTP status for REST failures, WebSocket close code for stream failures. */
+  readonly code?: number;
+  /** Machine-readable `detail.status` from the ElevenLabs body, if present. */
+  readonly apiStatus?: string;
+  /** True when the problem is the API key itself (wrong, revoked, ID, scopes). */
+  readonly isAuthError: boolean;
+  /** Raw server-provided text, for the "Server said: …" line in the UI. */
+  readonly serverDetail?: string;
+
+  constructor(
+    message: string,
+    opts: {
+      code?: number;
+      apiStatus?: string;
+      isAuthError?: boolean;
+      serverDetail?: string;
+    } = {},
+  ) {
+    super(message);
+    this.name = "ElevenLabsError";
+    this.code = opts.code;
+    this.apiStatus = opts.apiStatus;
+    this.isAuthError = opts.isAuthError ?? false;
+    this.serverDetail = opts.serverDetail;
+  }
+}
+
+/**
+ * Plain-language translations for the ElevenLabs error statuses we care
+ * about. Anything unlisted falls back to the server's own message.
+ */
+const STATUS_EXPLANATIONS: Record<string, string> = {
+  api_key_id_used_as_api_key:
+    "The value in use is a Key ID, not an API key. A real API key starts " +
+    "with sk_ and is shown only once — right after the key is created on " +
+    "the ElevenLabs API-keys page. Create a new key and copy the sk_ value.",
+  invalid_api_key:
+    "ElevenLabs did not accept the API key. It may be mistyped, disabled, " +
+    "or revoked. Create a fresh key and paste the sk_ value it shows.",
+  missing_permissions:
+    'The API key was accepted but is missing a permission. The key needs ' +
+    '"Text to Speech" and "Voices: Read" enabled.',
+  quota_exceeded:
+    "The ElevenLabs account has run out of credits for this billing period.",
+};
+
+/** Statuses that mean "the key (not the request) is the problem". */
+const AUTH_STATUSES = new Set([
+  "api_key_id_used_as_api_key",
+  "invalid_api_key",
+  "missing_permissions",
+  "needs_authorization",
+  "authentication_required",
+]);
+
+/**
+ * ElevenLabs error bodies come in a few shapes:
+ *   { detail: { status: "invalid_api_key", message: "…" } }
+ *   { detail: "plain text" }
+ *   { detail: [{ msg: "…" }, …] }        (request-validation errors)
+ */
+function parseErrorBody(body: unknown): { status?: string; message?: string } {
+  if (typeof body !== "object" || body === null) return {};
+  const detail = (body as { detail?: unknown }).detail;
+  if (typeof detail === "string") return { message: detail };
+  if (Array.isArray(detail)) {
+    const first = detail[0] as { msg?: unknown } | undefined;
+    return { message: typeof first?.msg === "string" ? first.msg : undefined };
+  }
+  if (typeof detail === "object" && detail !== null) {
+    const d = detail as { status?: unknown; message?: unknown };
+    return {
+      status: typeof d.status === "string" ? d.status : undefined,
+      message: typeof d.message === "string" ? d.message : undefined,
+    };
+  }
+  return {};
+}
+
+/**
+ * Fetch all voices available to this API key. Used in the setup wizard, the
+ * main-screen voice picker, and as a cheap credential pre-flight on startup.
+ */
 export async function listVoices(apiKey: string): Promise<Voice[]> {
   const res = await fetch("https://api.elevenlabs.io/v1/voices", {
     headers: { "xi-api-key": apiKey },
   });
   if (!res.ok) {
-    throw new Error(`ElevenLabs /v1/voices failed: ${res.status} ${res.statusText}`);
+    let parsed: { status?: string; message?: string } = {};
+    let raw = "";
+    try {
+      raw = await res.text();
+      parsed = parseErrorBody(JSON.parse(raw));
+    } catch {
+      /* body missing or not JSON — fall through with what we have */
+    }
+    const translated =
+      parsed.status !== undefined
+        ? STATUS_EXPLANATIONS[parsed.status]
+        : undefined;
+    throw new ElevenLabsError(
+      translated ??
+        parsed.message ??
+        `ElevenLabs /v1/voices failed: ${res.status} ${res.statusText}`,
+      {
+        code: res.status,
+        apiStatus: parsed.status,
+        isAuthError:
+          res.status === 401 ||
+          res.status === 403 ||
+          (parsed.status !== undefined && AUTH_STATUSES.has(parsed.status)),
+        serverDetail: parsed.message ?? (raw || undefined),
+      },
+    );
   }
   const json = (await res.json()) as { voices: Voice[] };
   return json.voices ?? [];
+}
+
+/**
+ * Values that aren't sk_-prefixed are almost certainly not current API keys
+ * (e.g. a Key ID copied from the dashboard, or a legacy-era credential).
+ * Used for a warning, not a hard block — the server stays the final judge.
+ */
+export function looksLikeApiKey(value: string): boolean {
+  return value.trim().startsWith("sk_");
+}
+
+/**
+ * Turn a WebSocket failure (close reason and/or in-band error frame) into a
+ * structured, readable error. Close code 1008 is ElevenLabs' policy-violation
+ * code and covers both auth and quota problems, so we sniff the reason text.
+ * Exported for testability.
+ */
+export function classifyStreamFailure(
+  reason: string,
+  code?: number,
+): ElevenLabsError {
+  const text = (reason || "").trim();
+  const quota = /quota|credit/i.test(text);
+  const keyId = /key\s*id/i.test(text);
+  const auth =
+    !quota &&
+    (keyId || /api[\s_-]?key|auth|unauthorized|permission/i.test(text));
+  if (quota) {
+    return new ElevenLabsError(STATUS_EXPLANATIONS.quota_exceeded, {
+      code,
+      apiStatus: "quota_exceeded",
+      serverDetail: text,
+    });
+  }
+  if (auth) {
+    return new ElevenLabsError(
+      keyId
+        ? STATUS_EXPLANATIONS.api_key_id_used_as_api_key
+        : "ElevenLabs rejected the saved API key, so nothing was spoken. " +
+          "The key may be revoked, disabled, or missing permissions.",
+      { code, isAuthError: true, serverDetail: text },
+    );
+  }
+  return new ElevenLabsError(
+    code !== undefined
+      ? `WebSocket closed (${code}) ${text}`.trim()
+      : `ElevenLabs: ${text}`,
+    { code, serverDetail: text || undefined },
+  );
 }
 
 export interface StreamSpeakOptions {
@@ -143,7 +309,9 @@ export function openSpeakStream(opts: StreamSpeakOptions): StreamHandle {
         message?: string;
       };
       if (msg.error) {
-        onError(new Error(`ElevenLabs: ${msg.error} ${msg.message ?? ""}`));
+        onError(
+          classifyStreamFailure(`${msg.error} ${msg.message ?? ""}`.trim()),
+        );
         return;
       }
       if (msg.audio) onAudioChunk(msg.audio);
@@ -159,9 +327,11 @@ export function openSpeakStream(opts: StreamSpeakOptions): StreamHandle {
 
   ws.addEventListener("close", (ev) => {
     // Normal close (1000) after `isFinal` is fine and already handled by onDone.
-    // Abnormal closes should surface as errors.
+    // Abnormal closes should surface as errors — classified, so auth problems
+    // (e.g. close 1008 "API key ID used as API key") arrive as readable
+    // ElevenLabsError objects with isAuthError set.
     if (!aborted && ev.code !== 1000 && ev.code !== 1005) {
-      onError(new Error(`WebSocket closed (${ev.code}) ${ev.reason}`));
+      onError(classifyStreamFailure(ev.reason, ev.code));
     }
   });
 

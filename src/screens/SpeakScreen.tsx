@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { base64ToPCM16, type AudioPlayer, type PlayerState } from "../lib/audioPlayer";
 import {
+  ElevenLabsError,
   listVoices,
   openSpeakStream,
   type StreamHandle,
@@ -57,6 +58,13 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
   const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null);
   const [queued, setQueued] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // API-key problems get their own persistent recovery card (instead of the
+  // transient error banner) so the full explanation stays readable and the
+  // fix is one tap away. See the Aug 2026 key outage.
+  const [authProblem, setAuthProblem] = useState<{
+    message: string;
+    detail?: string;
+  } | null>(null);
   const [lastUtterance, setLastUtterance] = useState<string>("");
 
   // Recent utterances, oldest first. Entries are added when an utterance
@@ -137,6 +145,28 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
     textareaRef.current?.focus();
   }, []);
 
+  // Credential pre-flight: verify the saved key with a cheap REST call on
+  // mount, so a key that ElevenLabs has stopped accepting surfaces as a clear
+  // "fix the key" card when the app opens — not as a mystery failure in the
+  // middle of a phone call. Non-auth failures (offline, ElevenLabs 5xx) stay
+  // quiet: speaking may still work, and the speak path reports its own errors.
+  useEffect(() => {
+    if (!settings.apiKey) return;
+    let cancelled = false;
+    void listVoices(settings.apiKey)
+      .then(() => {
+        if (!cancelled) setAuthProblem(null);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled && err instanceof ElevenLabsError && err.isAuthError) {
+          setAuthProblem({ message: err.message, detail: err.serverDetail });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.apiKey]);
+
   // Keep the newest history entry in view.
   useEffect(() => {
     historyEndRef.current?.scrollIntoView({ block: "nearest" });
@@ -183,7 +213,13 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
           if (next) speak(next);
         },
         onError: (err) => {
-          setError(err.message);
+          // Key problems go to the persistent recovery card; everything else
+          // to the transient banner.
+          if (err instanceof ElevenLabsError && err.isAuthError) {
+            setAuthProblem({ message: err.message, detail: err.serverDetail });
+          } else {
+            setError(err.message);
+          }
           player.cancel();
           activeStreamRef.current = null;
           setHistoryStatus(historyId, "error");
@@ -346,7 +382,14 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
         const list = await listVoices(settings.apiKey);
         setVoices(list);
       } catch (err) {
-        setVoicePickerError(err instanceof Error ? err.message : String(err));
+        if (err instanceof ElevenLabsError && err.isAuthError) {
+          setAuthProblem({ message: err.message, detail: err.serverDetail });
+          setVoicePickerError(
+            "Couldn't load voices — see the API-key notice above.",
+          );
+        } else {
+          setVoicePickerError(err instanceof Error ? err.message : String(err));
+        }
       } finally {
         setLoadingVoices(false);
       }
@@ -454,6 +497,52 @@ export function SpeakScreen({ player, settings, onOpenSettings }: Props) {
           </button>
         </div>
       </div>
+
+      {/* Persistent API-key recovery card. Unlike the transient error banner
+          below, this stays up until fixed or dismissed, shows the full server
+          explanation, and offers a one-tap path into Settings. */}
+      {authProblem && (
+        <div className="bg-rose-500/15 border-b-2 border-rose-500 px-4 py-3 space-y-2">
+          <div className="text-rose-100 font-semibold text-base">
+            Problem with the ElevenLabs API key
+          </div>
+          <p className="text-rose-200 text-sm">{authProblem.message}</p>
+          {authProblem.detail && authProblem.detail !== authProblem.message && (
+            <p className="text-rose-300/80 text-xs break-words">
+              Server said: {authProblem.detail}
+            </p>
+          )}
+          <p className="text-rose-200 text-sm">
+            To fix it: open the{" "}
+            <a
+              href="https://elevenlabs.io/app/settings/api-keys"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
+              ElevenLabs API-keys page
+            </a>
+            , create a new key with <b>Text to Speech</b> and{" "}
+            <b>Voices: Read</b> permissions, copy the <code>sk_</code> value it
+            shows (it's shown only once), then press <b>Fix API key</b> and
+            paste it.
+          </p>
+          <div className="flex items-center gap-3 pt-1">
+            <button
+              className="bg-rose-500 hover:bg-rose-400 text-slate-900 px-4 py-2 rounded font-semibold"
+              onClick={onOpenSettings}
+            >
+              Fix API key
+            </button>
+            <button
+              className="text-rose-300/80 text-sm ml-auto hover:text-rose-200"
+              onClick={() => setAuthProblem(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Inline voice picker — opened by clicking the voice name above. */}
       {showVoicePicker && (
